@@ -31,11 +31,18 @@
       },
       {
         "command": "stockHeatmap.refresh",
-        "title": "Stock Heatmap: Refresh"
+        "title": "Stock Heatmap: Refresh",
+        "icon": "$(refresh)"
       },
       {
         "command": "stockHeatmap.addSymbol",
-        "title": "Stock Heatmap: Add Symbol"
+        "title": "Stock Heatmap: Add Symbol",
+        "icon": "$(add)"
+      },
+      {
+        "command": "stockHeatmap.removeSymbol",
+        "title": "Stock Heatmap: Remove Symbol",
+        "icon": "$(trash)"
       },
       {
         "command": "stockHeatmap.analyzeSymbol",
@@ -76,6 +83,13 @@
           "when": "view == stockHeatmap.watchlist",
           "group": "navigation"
         }
+      ],
+      "view/item/context": [
+        {
+          "command": "stockHeatmap.removeSymbol",
+          "when": "view == stockHeatmap.watchlist && viewItem == watchlistItem",
+          "group": "inline"
+        }
       ]
     },
     "configuration": {
@@ -107,7 +121,16 @@
         "stockHeatmap.watchlist": {
           "type": "array",
           "default": [],
-          "description": "自選股代碼清單，例如 [\"2330\", \"2317\", \"AAPL\"]"
+          "description": "自選股清單（含中文名稱與分群）",
+          "items": {
+            "type": "object",
+            "required": ["symbol", "name", "group"],
+            "properties": {
+              "symbol": { "type": "string", "description": "股票代碼，例如 2330、AAPL" },
+              "name":   { "type": "string", "description": "中文名稱，例如 台積電" },
+              "group":  { "type": "string", "description": "群組名稱，例如 半導體" }
+            }
+          }
         },
         "stockHeatmap.llm.mode": {
           "type": "string",

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { WatchlistProvider } from './views/WatchlistProvider';
+import { WatchlistProvider, WatchlistEntry, WatchlistStockItem, normalizeWatchlist } from './views/WatchlistProvider';
 import { DashboardPanel } from './views/DashboardPanel';
 import { MarketDataService } from './services/MarketDataService';
 import { NewsService } from './services/NewsService';
@@ -55,6 +55,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // ── 指令：加入自選股 ─────────────────────────────────────────────────────
     vscode.commands.registerCommand('stockHeatmap.addSymbol', async () => {
+      // 1) 股票代碼
       const sym = await vscode.window.showInputBox({
         prompt: '輸入股票代碼（台股：2330，美股：AAPL）',
         placeHolder: '2330',
@@ -62,15 +63,82 @@ export function activate(context: vscode.ExtensionContext) {
       });
       if (!sym) { return; }
       const upper = sym.trim().toUpperCase();
+
+      // 2) 自動查詢名稱，查到後預填；查不到則空白讓使用者填
+      let fetchedName = '';
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `查詢 ${upper} 名稱…`, cancellable: false },
+        async () => { fetchedName = await marketData.getStockName(upper); },
+      );
+
+      const name = await vscode.window.showInputBox({
+        prompt: `${upper} 的顯示名稱（可手動修改）`,
+        placeHolder: fetchedName || upper,
+        value: fetchedName || upper,
+      });
+      if (name === undefined) { return; }
+
+      // 3) 選擇或新增群組
       const config = vscode.workspace.getConfiguration('stockHeatmap');
-      const watchlist: string[] = config.get('watchlist', []);
-      if (watchlist.includes(upper)) {
+      const watchlist = normalizeWatchlist(config.get<unknown[]>('watchlist', []));
+
+      if (watchlist.some((e) => e.symbol === upper)) {
         vscode.window.showWarningMessage(`${upper} 已在自選股清單中`);
         return;
       }
-      await config.update('watchlist', [...watchlist, upper], vscode.ConfigurationTarget.Global);
+
+      const existingGroups = [...new Set(watchlist.map((e) => e.group || '預設'))];
+      const ADD_NEW = '＋ 新增群組…';
+      const groupChoices = existingGroups.length > 0 ? [...existingGroups, ADD_NEW] : [ADD_NEW];
+
+      const picked = await vscode.window.showQuickPick(groupChoices, {
+        placeHolder: '選擇群組（或新增）',
+      });
+      if (!picked) { return; }
+
+      let group: string;
+      if (picked === ADD_NEW) {
+        const newGroup = await vscode.window.showInputBox({
+          prompt: '輸入新群組名稱',
+          placeHolder: '半導體',
+          validateInput: (v) => v.trim().length === 0 ? '群組名稱不能為空' : undefined,
+        });
+        if (!newGroup) { return; }
+        group = newGroup.trim();
+      } else {
+        group = picked;
+      }
+
+      const entry: WatchlistEntry = {
+        symbol: upper,
+        name: (name || upper).trim(),
+        group,
+      };
+      await config.update('watchlist', [...watchlist, entry], vscode.ConfigurationTarget.Global);
       watchlistProvider.refresh();
-      vscode.window.showInformationMessage(`已加入 ${upper}`);
+      vscode.window.showInformationMessage(`已加入 ${entry.name}（${upper}）到「${group}」`);
+    }),
+
+    // ── 指令：移除自選股（右鍵選單）─────────────────────────────────────────
+    vscode.commands.registerCommand('stockHeatmap.removeSymbol', async (item: WatchlistStockItem) => {
+      const symbol = item.entry.symbol;
+      const label = typeof item.label === 'string' ? item.label : symbol;
+      const confirm = await vscode.window.showWarningMessage(
+        `確定要從自選股移除 ${label}（${symbol}）嗎？`,
+        { modal: true },
+        '確定',
+      );
+      if (confirm !== '確定') { return; }
+
+      const config = vscode.workspace.getConfiguration('stockHeatmap');
+      const watchlist = normalizeWatchlist(config.get<unknown[]>('watchlist', []));
+      await config.update(
+        'watchlist',
+        watchlist.filter((e) => e.symbol !== symbol),
+        vscode.ConfigurationTarget.Global,
+      );
+      watchlistProvider.refresh();
+      vscode.window.showInformationMessage(`已移除 ${label}（${symbol}）`);
     }),
 
     // ── 指令：分析股票（Webview loadSymbol）───────────────────────────────────

@@ -21,9 +21,24 @@ interface FinMindResponse<T> {
   msg: string;
   data: T[];
 }
+interface FinMindStockInfoRow {
+  stock_id: string;
+  stock_name: string;
+}
 
 // ---------------------------------------------------------------------------
 // Finnhub API 回應型別（美股）
+// ---------------------------------------------------------------------------
+interface FinnhubProfile {
+  name: string;
+  ticker: string;
+  country: string;
+  currency: string;
+  exchange: string;
+}
+
+// ---------------------------------------------------------------------------
+// Finnhub API 回應型別（內部 quote / candle）
 // ---------------------------------------------------------------------------
 interface FinnhubQuote {
   c: number;  // current price
@@ -53,12 +68,62 @@ export class MarketDataService {
 
   private static readonly FINMIND_BASE = 'https://api.finmindtrade.com/api/v4/data';
   private static readonly FINNHUB_BASE = 'https://finnhub.io/api/v1';
+  /** TWSE 代碼查詢（免 Key，回傳 suggestions 陣列，每格格式："2330     台積電"） */
+  private static readonly TWSE_CODE_QUERY = 'https://www.twse.com.tw/zh/api/codeQuery';
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   // ---------------------------------------------------------------------------
   // 公開 API
   // ---------------------------------------------------------------------------
+
+  /**
+   * 取得股票中文（或英文）名稱
+   * 台股：TWSE/TPEx 公開 API（免 Key）→ 中文名稱
+   * 美股：Finnhub /stock/profile2 → 英文名稱
+   * 查不到則回傳空字串
+   */
+  async getStockName(symbol: string): Promise<string> {
+    const cacheKey = `name:${symbol}`;
+    const cached = this.getCached<string>(cacheKey);
+    if (cached !== undefined) { return cached; }
+
+    try {
+      let name = '';
+      if (this.detectMarket(symbol) === 'TW') {
+        name = await this.getTWStockName(symbol);
+      } else {
+        const token = this.getApiKey('US');
+        const url = `${MarketDataService.FINNHUB_BASE}/stock/profile2?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(token)}`;
+        const resp = await fetch(url);
+        if (resp.ok) {
+          const json = await resp.json() as FinnhubProfile;
+          name = json.name ?? '';
+        }
+      }
+      this.setCached(cacheKey, name, 3600); // 名稱快取 1 小時
+      return name;
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 從 TWSE codeQuery API 取得台股中文名稱（免 API Key）
+   * 回應格式：{ suggestions: ["2330     台積電", ...] }
+   * 取第一筆，去掉代碼前置後取餘下部分
+   */
+  private async getTWStockName(symbol: string): Promise<string> {
+    const url = `${MarketDataService.TWSE_CODE_QUERY}?query=${encodeURIComponent(symbol)}`;
+    const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!resp.ok) { return ''; }
+    const json = await resp.json() as { suggestions?: string[] };
+    const first = json.suggestions?.[0] ?? '';
+    if (!first) { return ''; }
+    // 格式："2330     台積電" — 移除開頭的代碼與空白，取中文名稱部分
+    const name = first.replace(/^\S+\s+/, '').trim();
+    return name;
+  }
 
   /** 取得多檔報價（自動依代碼判斷市場） */
   async getQuotes(symbols: string[]): Promise<Quote[]> {
