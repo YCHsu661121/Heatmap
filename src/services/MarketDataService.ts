@@ -159,8 +159,12 @@ export class MarketDataService {
 
   /** 取得熱力圖資料（目前回傳 watchlist 報價格式化為 HeatmapItem） */
   async getHeatmap(market: Market, _groupBy: 'sector' | 'index'): Promise<HeatmapItem[]> {
-    const watchlist: string[] = vscode.workspace.getConfiguration('stockHeatmap').get('watchlist', []);
-    const symbols = watchlist.filter((s) =>
+    const raw: unknown[] = vscode.workspace.getConfiguration('stockHeatmap').get('watchlist', []);
+    // watchlist 可能是舊版 string[] 或新版 WatchlistEntry[]，統一正規化取出代碼
+    const allSymbols = raw.map((e) =>
+      typeof e === 'string' ? (e as string).toUpperCase() : (e as { symbol: string }).symbol,
+    );
+    const symbols = allSymbols.filter((s) =>
       market === 'TW' ? this.detectMarket(s) === 'TW' : this.detectMarket(s) === 'US',
     );
     if (symbols.length === 0) { return []; }

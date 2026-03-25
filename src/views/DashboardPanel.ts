@@ -337,7 +337,7 @@ export class DashboardPanel {
   }
 
   // ── K 線圖（Canvas 極簡實作） ─────────────────────────────────────────────
-  // 使用 Canvas 手繪 OHLC，避免外部依賴
+  // 使用 Canvas 手繪 OHLC + 趨勢線（SMA5/SMA20/布林通道），避免外部依賴
   function renderChart(symbol, candles, signal) {
     $('chart-title').textContent = 'K 線圖：' + symbol;
     const canvas = $('chart-canvas');
@@ -357,36 +357,152 @@ export class DashboardPanel {
     const n = Math.min(candles.length, 100); // 只顯示最後 100 根
     const slice = candles.slice(-n);
     const closes = slice.map(c => c.close);
-    const highs = slice.map(c => c.high);
-    const lows  = slice.map(c => c.low);
-    const minP = Math.min(...lows);
-    const maxP = Math.max(...highs);
+    const highs  = slice.map(c => c.high);
+    const lows   = slice.map(c => c.low);
+
+    // ── 趨勢指標計算（純本地，不需外部套件）──────────────────────────────────
+    // SMA 計算（從完整 candles 取，確保 slice 的每根都有對應值）
+    const allCloses = candles.map(c => c.close);
+    function sma(arr, period, targetLen) {
+      const result = new Array(targetLen).fill(null);
+      const offset = arr.length - targetLen;
+      for (let i = 0; i < targetLen; i++) {
+        const idx = offset + i;
+        if (idx < period - 1) { continue; }
+        let sum = 0;
+        for (let j = idx - period + 1; j <= idx; j++) { sum += arr[j]; }
+        result[i] = sum / period;
+      }
+      return result;
+    }
+    function bollingerBands(arr, period, mult, targetLen) {
+      const mid = sma(arr, period, targetLen);
+      const upper = new Array(targetLen).fill(null);
+      const lower = new Array(targetLen).fill(null);
+      const offset = arr.length - targetLen;
+      for (let i = 0; i < targetLen; i++) {
+        if (mid[i] === null) { continue; }
+        const idx = offset + i;
+        let variance = 0;
+        for (let j = idx - period + 1; j <= idx; j++) {
+          variance += Math.pow(arr[j] - mid[i], 2);
+        }
+        const stddev = Math.sqrt(variance / period);
+        upper[i] = mid[i] + mult * stddev;
+        lower[i] = mid[i] - mult * stddev;
+      }
+      return { mid, upper, lower };
+    }
+
+    const sma5  = sma(allCloses, 5,  n);
+    const sma20 = sma(allCloses, 20, n);
+    const bb    = bollingerBands(allCloses, 20, 2, n);
+
+    // ── 整體價格範圍（含趨勢線極值）──────────────────────────────────────────
+    const allVals = [
+      ...highs, ...lows,
+      ...sma5.filter(v => v !== null),
+      ...sma20.filter(v => v !== null),
+      ...bb.upper.filter(v => v !== null),
+      ...bb.lower.filter(v => v !== null),
+    ];
+    const minP = Math.min(...allVals);
+    const maxP = Math.max(...allVals);
     const range = maxP - minP || 1;
 
-    const pad = { t: 10, b: 20, l: 10, r: 10 };
-    const cw = (w - pad.l - pad.r) / n;
+    const pad = { t: 16, b: 20, l: 50, r: 10 };
+    const cw  = (w - pad.l - pad.r) / n;
     const toY = (p) => pad.t + (1 - (p - minP) / range) * (h - pad.t - pad.b);
+    const toX = (i) => pad.l + i * cw + cw / 2; // 中心 x
 
     ctx.clearRect(0, 0, w, h);
 
+    // ── 價格刻度（左側 Y 軸，5 格）────────────────────────────────────────────
+    ctx.fillStyle = 'rgba(128,128,128,0.6)';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'right';
+    for (let tick = 0; tick <= 4; tick++) {
+      const price = minP + (range * tick / 4);
+      const y = toY(price);
+      ctx.fillText(price.toFixed(0), pad.l - 4, y + 3);
+      ctx.strokeStyle = 'rgba(128,128,128,0.1)';
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    }
+    ctx.textAlign = 'left';
+
+    // ── 布林通道（填充半透明區域）────────────────────────────────────────────
+    ctx.beginPath();
+    let bbStarted = false;
+    for (let i = 0; i < n; i++) {
+      if (bb.upper[i] === null) { continue; }
+      if (!bbStarted) { ctx.moveTo(toX(i), toY(bb.upper[i])); bbStarted = true; }
+      else { ctx.lineTo(toX(i), toY(bb.upper[i])); }
+    }
+    for (let i = n - 1; i >= 0; i--) {
+      if (bb.lower[i] === null) { continue; }
+      ctx.lineTo(toX(i), toY(bb.lower[i]));
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(100,149,237,0.08)';
+    ctx.fill();
+
+    // 布林通道上下軌線
+    function drawLine(arr, color, dash) {
+      ctx.strokeStyle = color;
+      ctx.setLineDash(dash || []);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < n; i++) {
+        if (arr[i] === null) { continue; }
+        if (!started) { ctx.moveTo(toX(i), toY(arr[i])); started = true; }
+        else { ctx.lineTo(toX(i), toY(arr[i])); }
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    drawLine(bb.upper, 'rgba(100,149,237,0.5)', [3,3]);
+    drawLine(bb.lower, 'rgba(100,149,237,0.5)', [3,3]);
+    drawLine(bb.mid,   'rgba(100,149,237,0.35)', [2,4]);
+
+    // ── K 線蠟燭 ────────────────────────────────────────────────────────────
+    ctx.lineWidth = 1;
     slice.forEach((c, i) => {
-      const x = pad.l + i * cw + cw * 0.1;
+      const x  = pad.l + i * cw + cw * 0.15;
       const bw = cw * 0.7;
       const isUp = c.close >= c.open;
       ctx.strokeStyle = isUp ? '#4caf50' : '#f44336';
       ctx.fillStyle   = isUp ? '#4caf50' : '#f44336';
 
-      // wick
+      // 影線
       const mx = x + bw / 2;
-      ctx.beginPath();
-      ctx.moveTo(mx, toY(c.high));
-      ctx.lineTo(mx, toY(c.low));
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(mx, toY(c.high)); ctx.lineTo(mx, toY(c.low)); ctx.stroke();
 
-      // body
+      // 實體
       const y1 = toY(Math.max(c.open, c.close));
       const y2 = toY(Math.min(c.open, c.close));
       ctx.fillRect(x, y1, bw, Math.max(y2 - y1, 1));
+    });
+
+    // ── 趨勢均線（疊加在蠟燭上方）────────────────────────────────────────────
+    ctx.lineWidth = 1.5;
+    drawLine(sma5,  'rgba(255, 193,  7, 0.9)');   // 金色：均線5
+    drawLine(sma20, 'rgba(255, 112, 67, 0.9)');   // 橘色：均線20
+
+    // ── 圖例 ─────────────────────────────────────────────────────────────────
+    const legend = [
+      { color: '#ffc107', label: '均5' },
+      { color: '#ff7043', label: '均20' },
+      { color: 'rgba(100,149,237,0.7)', label: 'BB' },
+    ];
+    ctx.font = '10px sans-serif';
+    let lx = pad.l + 4;
+    legend.forEach(({ color, label }) => {
+      ctx.strokeStyle = color; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(lx, 8); ctx.lineTo(lx + 14, 8); ctx.stroke();
+      ctx.fillStyle = 'rgba(200,200,200,0.85)';
+      ctx.fillText(label, lx + 16, 11);
+      lx += label.length * 7 + 26;
     });
 
     // 顯示訊號 badge
