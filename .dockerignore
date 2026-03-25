@@ -1,0 +1,10 @@
+# 不需要複製進 Docker build context 的檔案
+node_modules/
+out/
+dist/
+.git/
+backend/
+nginx/
+docs/
+compile_errors.txt
+*.vsix

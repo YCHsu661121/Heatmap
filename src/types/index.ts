@@ -37,6 +37,17 @@ export interface HeatmapItem {
   name: string;
   changePercent: number;
   score: number;
+  // 選填：尺寸指標
+  marketCap?: number;   // 總市值（元）
+  turnover?: number;    // 成交額（元）
+  volume?: number;      // 成交量（股）
+  // 選填：多期別漲跌幅
+  change5D?: number;
+  change20D?: number;
+  change60D?: number;
+  change240D?: number;
+  // 選填：市場別
+  market?: 'TSE' | 'OTC' | string;
 }
 
 // ---------------------------------------------------------------------------

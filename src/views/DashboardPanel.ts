@@ -19,12 +19,19 @@ import { HeatmapItem, Candle, SignalResult, NewsItem, FinancialReportSummary } f
 export class DashboardPanel {
   private static instance: DashboardPanel | undefined;
   private readonly panel: vscode.WebviewPanel;
+  private _ready = false;
+  private _messageQueue: unknown[] = [];
 
   public static readonly VIEW_TYPE = 'stockHeatmap.dashboard';
 
   // ---------------------------------------------------------------------------
   // Singleton 取得 / 建立
   // ---------------------------------------------------------------------------
+
+  /** 取得目前開啟的面板（若未開啟則傳回 undefined） */
+  static get current(): DashboardPanel | undefined {
+    return DashboardPanel.instance;
+  }
 
   static createOrShow(context: vscode.ExtensionContext): DashboardPanel {
     if (DashboardPanel.instance) {
@@ -105,7 +112,11 @@ export class DashboardPanel {
   }
 
   private post(message: unknown): void {
-    this.panel.webview.postMessage(message);
+    if (this._ready) {
+      this.panel.webview.postMessage(message);
+    } else {
+      this._messageQueue.push(message);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -113,6 +124,14 @@ export class DashboardPanel {
   // ---------------------------------------------------------------------------
 
   private handleWebviewMessage(msg: { command: string; payload?: unknown }): void {
+    if (msg.command === 'ready') {
+      this._ready = true;
+      for (const m of this._messageQueue) {
+        this.panel.webview.postMessage(m);
+      }
+      this._messageQueue = [];
+      return;
+    }
     vscode.commands.executeCommand(`stockHeatmap.${msg.command}`, msg.payload);
   }
 
@@ -149,30 +168,54 @@ export class DashboardPanel {
          background: var(--bg); color: var(--fg); padding: 8px; }
   h2 { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: var(--vscode-foreground); }
   #toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
-  #symbol-input { width: 120px; padding: 3px 6px; background: var(--vscode-input-background);
-                  color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border);
-                  border-radius: 3px; }
+  #current-sym { font-size: 14px; font-weight: 700; min-width: 64px; letter-spacing: 0.03em;
+                 color: var(--vscode-foreground); }
   .btn { padding: 3px 10px; background: var(--accent); color: var(--vscode-button-foreground);
          border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
   .btn:hover { opacity: 0.85; }
   #status-bar { font-size: 11px; color: var(--vscode-descriptionForeground); }
 
   /* Layout */
+  .top-section { display: grid; grid-template-columns: 55fr 45fr; gap: 8px; margin-bottom: 8px; }
   #main { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  @media (max-width: 700px) { #main { grid-template-columns: 1fr; } }
+  @media (max-width: 700px) { .top-section { grid-template-columns: 1fr; } #main { grid-template-columns: 1fr; } }
   .card { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; }
 
-  /* Heatmap */
-  #heatmap-grid { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-  .heatmap-cell { padding: 4px 6px; border-radius: 3px; font-size: 11px; text-align: center;
-                  min-width: 60px; cursor: pointer; }
-  .up   { background: rgba(76,175,80,0.25); color: var(--green); }
-  .down { background: rgba(244,67,54,0.25); color: var(--red); }
-  .flat { background: rgba(128,128,128,0.15); }
+  /* Heatmap Section */
+  #heatmap-section { margin-bottom: 0; }
+  #hm-title-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  #hm-title-row h2 { margin: 0; }
+  #hm-help { cursor: help; color: var(--vscode-descriptionForeground); font-size: 12px; }
+  #heatmap-status { font-size: 11px; color: var(--vscode-descriptionForeground); margin-left: auto; }
+
+  /* Filter Bar */
+  .hm-filter-row { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; flex-wrap: wrap; }
+  .hm-filter-label { font-size: 11px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+  .hm-btn-group { display: flex; border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
+  .hm-btn { padding: 2px 9px; font-size: 11px; background: none; color: var(--fg);
+            border: none; border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap;
+            transition: background 0.15s; }
+  .hm-btn:last-child { border-right: none; }
+  .hm-btn:hover { background: rgba(128,128,128,0.15); }
+  .hm-btn.active { background: rgba(0,120,212,0.18); color: #0078d4; font-weight: 600; }
+
+  /* Heatmap Grid */
+  #heatmap-grid { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 4px; min-height: 80px; }
+  .hm-group { width: 100%; margin-bottom: 2px; }
+  .hm-group-label { font-size: 10px; color: var(--vscode-descriptionForeground); padding: 1px 4px; margin-bottom: 2px; }
+  .hm-group-cells { display: flex; flex-wrap: wrap; gap: 2px; }
+  .hm-cell { display: flex; flex-direction: column; align-items: center; justify-content: center;
+             padding: 3px 4px; border-radius: 3px; cursor: pointer; overflow: hidden;
+             min-width: 48px; min-height: 40px; transition: opacity 0.1s; }
+  .hm-cell:hover { opacity: 0.8; }
+  .hm-cell .hm-sym  { font-size: 11px; font-weight: 700; line-height: 1.3; }
+  .hm-cell .hm-name { font-size: 9px; opacity: 0.85; line-height: 1.2; white-space: nowrap;
+                      overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .hm-cell .hm-pct  { font-size: 11px; font-weight: 600; line-height: 1.3; }
 
   /* Chart */
   #chart-container { width: 100%; height: 260px; background: var(--bg); position: relative; }
-  #chart-canvas { width: 100%; height: 100%; }
+  #chart-canvas { display: block; width: 100%; height: 100%; }
   #signal-badge { position: absolute; top: 8px; right: 8px; padding: 4px 10px; border-radius: 12px;
                   font-size: 12px; font-weight: bold; display: none; }
   .signal-buy  { background: rgba(76,175,80,0.3); color: var(--green); }
@@ -217,26 +260,63 @@ export class DashboardPanel {
 <body>
 <!-- Toolbar -->
 <div id="toolbar">
-  <input id="symbol-input" type="text" placeholder="2330 / AAPL" />
+  <span id="current-sym" title="目前選取股票">—</span>
   <select id="timeframe-select">
     <option value="1D">日線</option>
     <option value="4H">4小時</option>
     <option value="1H">1小時</option>
     <option value="15m">15分鐘</option>
+    <option value="1W">週線</option>
+    <option value="1M">月線</option>
+    <option value="1Y">年線</option>
   </select>
-  <button class="btn" id="btn-load">載入</button>
   <button class="btn" id="btn-refresh">刷新</button>
-  <span id="status-bar">就緒</span>
+  <span id="status-bar">請從自選股清單或熱力圖點選股票</span>
+</div>
+
+<!-- Heatmap Section（全寬，獨立於 main grid 之上）-->
+<div id="heatmap-section" class="card">
+  <div id="hm-title-row">
+    <h2>股價漲跌即時熱力圖 <span id="hm-help" title="格子大小 = 總市值（可切換）；顏色深淺 = 漲跌幅度">ⓘ</span></h2>
+    <span id="heatmap-status"></span>
+  </div>
+  <div class="hm-filter-row">
+    <span class="hm-filter-label">≡ 熱力圖條件：</span>
+  </div>
+  <div class="hm-filter-row">
+    <div class="hm-btn-group">
+      <button class="hm-btn active" data-hm-filter="market" data-hm-val="ALL">全部</button>
+      <button class="hm-btn"        data-hm-filter="market" data-hm-val="TSE">上市</button>
+      <button class="hm-btn"        data-hm-filter="market" data-hm-val="OTC">上櫃</button>
+    </div>
+    <div class="hm-btn-group">
+      <button class="hm-btn active" data-hm-filter="groupBy" data-hm-val="none">不分產業</button>
+      <button class="hm-btn"        data-hm-filter="groupBy" data-hm-val="sector">區分產業</button>
+    </div>
+    <div class="hm-btn-group">
+      <button class="hm-btn"        data-hm-filter="display" data-hm-val="sector">顯示產業</button>
+      <button class="hm-btn active" data-hm-filter="display" data-hm-val="stock">顯示個股</button>
+    </div>
+  </div>
+  <div class="hm-filter-row">
+    <div class="hm-btn-group">
+      <button class="hm-btn active" data-hm-filter="sizeBy" data-hm-val="marketCap">總市值</button>
+      <button class="hm-btn"        data-hm-filter="sizeBy" data-hm-val="turnover">成交額</button>
+      <button class="hm-btn"        data-hm-filter="sizeBy" data-hm-val="volume">成交量</button>
+    </div>
+    <div class="hm-btn-group">
+      <button class="hm-btn active" data-hm-filter="period" data-hm-val="1D">今日</button>
+      <button class="hm-btn"        data-hm-filter="period" data-hm-val="5D">5日</button>
+      <button class="hm-btn"        data-hm-filter="period" data-hm-val="20D">20日</button>
+      <button class="hm-btn"        data-hm-filter="period" data-hm-val="60D">60日</button>
+      <button class="hm-btn"        data-hm-filter="period" data-hm-val="240D">240日</button>
+    </div>
+  </div>
+  <div id="heatmap-grid"><span style="color:var(--vscode-descriptionForeground)">無自選股資料</span></div>
 </div>
 
 <!-- Main Grid -->
 <div id="main">
-  <!-- Heatmap -->
-  <div class="card">
-    <h2>熱力圖</h2>
-    <div id="heatmap-grid"><span style="color:var(--vscode-descriptionForeground)">無自選股資料</span></div>
-  </div>
-
   <!-- Chart + Signal -->
   <div class="card">
     <h2 id="chart-title">K 線圖</h2>
@@ -270,6 +350,8 @@ export class DashboardPanel {
 <script nonce="${nonce}">
 (function() {
   const vscode = acquireVsCodeApi();
+  // 通知 Extension webview 已就緒，觸發緩衝訊息刷新
+  vscode.postMessage({ command: 'ready' });
 
   // ── 工具 ──────────────────────────────────────────────────────────────────
   const $ = (id) => document.getElementById(id);
@@ -315,20 +397,125 @@ export class DashboardPanel {
   function hideOverlay() { $('overlay').classList.remove('visible'); }
 
   // ── 熱力圖 ────────────────────────────────────────────────────────────────
+  let _hmData  = null;
+  const _hmState = { market: 'ALL', groupBy: 'none', display: 'stock', sizeBy: 'marketCap', period: '1D' };
+
+  document.querySelectorAll('[data-hm-filter]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const filter = btn.dataset.hmFilter;
+      const val    = btn.dataset.hmVal;
+      _hmState[filter] = val;
+      btn.closest('.hm-btn-group').querySelectorAll('.hm-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      if (_hmData) { renderHeatmap(_hmData); }
+    });
+  });
+
+  // 依漲跌幅取得背景/文字色
+  function hmColor(pct) {
+    if      (pct >=  5) return ['#0a3d1a','#fff'];
+    else if (pct >=  3) return ['#1b5e20','#fff'];
+    else if (pct >=  2) return ['#2e7d32','#fff'];
+    else if (pct >=  1) return ['#388e3c','#fff'];
+    else if (pct >= 0.3) return ['#4caf50','#fff'];
+    else if (pct > -0.3) return ['rgba(100,100,100,0.25)','var(--fg)'];
+    else if (pct > -1)  return ['#e57373','#fff'];
+    else if (pct > -2)  return ['#e53935','#fff'];
+    else if (pct > -3)  return ['#c62828','#fff'];
+    else if (pct > -5)  return ['#7f0000','#fff'];
+    else                return ['#4a0000','#fff'];
+  }
+
+  // 依期別取對應漲跌幅
+  function hmPct(item) {
+    const map = { '5D':'change5D', '20D':'change20D', '60D':'change60D', '240D':'change240D' };
+    const f = map[_hmState.period];
+    const v = f ? item[f] : null;
+    return (v != null) ? Number(v) : Number(item.changePercent);
+  }
+
+  // 依尺寸指標取值
+  function hmSize(item) {
+    const v = _hmState.sizeBy === 'turnover' ? item.turnover
+            : _hmState.sizeBy === 'volume'   ? item.volume
+            : item.marketCap;
+    return (v != null && v > 0) ? Number(v) : 1;
+  }
+
+  // 建立單格 HTML；flexGrow 控制相對寬度
+  function hmCellHtml(item, flexGrow) {
+    const pct  = hmPct(item);
+    const [bg, fg] = hmColor(pct);
+    const sign = pct > 0 ? '+' : '';
+    const sym  = String(item.symbol).replace(/'/g, '&#39;').replace(/</g,'&lt;');
+    const name = String(item.name  || '').replace(/'/g, '&#39;').replace(/</g,'&lt;');
+    return \`<div class="hm-cell" style="flex:\${flexGrow} 1 0%;background:\${bg};color:\${fg}"
+          title="[\${sym}] \${name}  \${sign}\${pct.toFixed(2)}%"
+          onclick="loadSymbol('\${sym}')">
+      <span class="hm-sym">\${sym}</span>
+      <span class="hm-name">\${name}</span>
+      <span class="hm-pct">\${sign}\${pct.toFixed(2)}%</span>
+    </div>\`;
+  }
+
   function renderHeatmap(items) {
+    _hmData = items;
     const grid = $('heatmap-grid');
     if (!items || items.length === 0) {
       grid.innerHTML = '<span style="color:var(--vscode-descriptionForeground)">無資料</span>';
+      $('heatmap-status').textContent = '';
       return;
     }
-    grid.innerHTML = items.map(item => {
-      const pct = Number(item.changePercent);
-      const c = pct > 0.5 ? 'up' : pct < -0.5 ? 'down' : 'flat';
-      return \`<div class="heatmap-cell \${c}" title="\${item.sector}" onclick="loadSymbol('\${item.symbol}')">
-        <div>\${item.symbol}</div>
-        <div>\${pct > 0 ? '+' : ''}\${pct.toFixed(2)}%</div>
-      </div>\`;
-    }).join('');
+
+    // 市場別篩選
+    let list = _hmState.market === 'ALL' ? items
+             : items.filter(i => !i.market || i.market === _hmState.market);
+
+    // 顯示產業模式：彙總各產業
+    if (_hmState.display === 'sector') {
+      const sm = {};
+      list.forEach(item => {
+        const s = item.sector || '其他';
+        if (!sm[s]) { sm[s] = { syms: [], pctTotal: 0, sizeTotal: 0 }; }
+        const sz = hmSize(item);
+        sm[s].syms.push(item.symbol);
+        sm[s].pctTotal  += hmPct(item) * sz;
+        sm[s].sizeTotal += sz;
+      });
+      list = Object.entries(sm).map(([sec, d]) => ({
+        symbol: sec, name: d.syms.slice(0,3).join(',') + (d.syms.length > 3 ? '…' : ''),
+        sector: sec, changePercent: d.sizeTotal ? d.pctTotal / d.sizeTotal : 0,
+        marketCap: d.sizeTotal,
+      }));
+    }
+
+    // 對數縮放後計算 flexGrow（1~60）
+    const sizes  = list.map(i => Math.log1p(hmSize(i)));
+    const maxSz  = Math.max(...sizes, 1);
+    const grows  = sizes.map(s => Math.max(1, Math.round((s / maxSz) * 60)));
+
+    if (_hmState.groupBy === 'none' || _hmState.display === 'sector') {
+      grid.innerHTML = list.map((item, i) => hmCellHtml(item, grows[i])).join('');
+    } else {
+      // 區分產業分組
+      const secMap = {};
+      list.forEach((item, i) => {
+        const s = item.sector || '其他';
+        if (!secMap[s]) { secMap[s] = []; }
+        secMap[s].push({ item, grow: grows[i] });
+      });
+      grid.innerHTML = Object.entries(secMap).map(([sec, entries]) => {
+        const cells = entries.map(e => hmCellHtml(e.item, e.grow)).join('');
+        return \`<div class="hm-group">
+          <div class="hm-group-label">\${sec}</div>
+          <div class="hm-group-cells">\${cells}</div>
+        </div>\`;
+      }).join('');
+    }
+
+    const up   = list.filter(i => hmPct(i) > 0).length;
+    const dn   = list.filter(i => hmPct(i) < 0).length;
+    $('heatmap-status').textContent = \`共 \${list.length} 檔　\${up > 0 ? '▲' + up : ''}　\${dn > 0 ? '▼' + dn : ''}\`;
   }
 
   function loadSymbol(sym) {
@@ -338,14 +525,35 @@ export class DashboardPanel {
 
   // ── K 線圖（Canvas 極簡實作） ─────────────────────────────────────────────
   // 使用 Canvas 手繪 OHLC + 趨勢線（SMA5/SMA20/布林通道），避免外部依賴
+  let _lastChart = null;
+  let _resizeTimer = null;
+
+  // 面板 resize 時重繪（debounce 100ms，避免拖拉時連續重繪）
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => {
+      clearTimeout(_resizeTimer);
+      _resizeTimer = setTimeout(() => {
+        if (_lastChart) {
+          renderChart(_lastChart.symbol, _lastChart.candles, _lastChart.signal);
+        }
+      }, 100);
+    }).observe($('chart-container'));
+  }
+
   function renderChart(symbol, candles, signal) {
+    _lastChart = { symbol, candles, signal };
     $('chart-title').textContent = 'K 線圖：' + symbol;
     const canvas = $('chart-canvas');
     const ctx = canvas.getContext('2d');
-    const w = canvas.offsetWidth || 400;
-    const h = canvas.offsetHeight || 240;
-    canvas.width = w;
-    canvas.height = h;
+    const dpr = window.devicePixelRatio || 1;
+    const container = canvas.parentElement;
+    // 讀取容器當前尺寸（canvas 本身維持 CSS width:100%/height:100%，不覆寫 style）
+    const w = container.clientWidth  || 400;
+    const h = container.clientHeight || 260;
+    // 只設定 buffer 解析度；CSS display:block + width:100%/height:100% 控制視覺大小
+    canvas.width  = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.scale(dpr, dpr);
 
     if (!candles || candles.length === 0) {
       ctx.fillStyle = 'gray';

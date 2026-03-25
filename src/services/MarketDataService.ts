@@ -149,7 +149,7 @@ export class MarketDataService {
     if (cached) { return cached; }
 
     const candles = this.detectMarket(symbol) === 'TW'
-      ? await this.getTWCandles(symbol, from, to)
+      ? await this.getTWCandles(symbol, from, to, interval)
       : await this.getUSCandles(symbol, interval, from, to);
 
     const ttl = vscode.workspace.getConfiguration('stockHeatmap').get<number>('storage.cacheTtlSec', 300);
@@ -213,9 +213,13 @@ export class MarketDataService {
     return quote;
   }
 
-  private async getTWCandles(symbol: string, from: string, to: string): Promise<Candle[]> {
+  private async getTWCandles(symbol: string, from: string, to: string, interval = '1D'): Promise<Candle[]> {
     const token = this.getApiKey('TW');
-    const url = `${MarketDataService.FINMIND_BASE}?dataset=TaiwanStockPrice&data_id=${symbol}&start_date=${from}&end_date=${to}&token=${encodeURIComponent(token)}`;
+    // 依 interval 選 FinMind dataset
+    let dataset = 'TaiwanStockPrice';
+    if (interval === '1W') { dataset = 'TaiwanStockWeekPrice'; }
+    else if (interval === '1M' || interval === '1Y') { dataset = 'TaiwanStockMonthPrice'; }
+    const url = `${MarketDataService.FINMIND_BASE}?dataset=${dataset}&data_id=${symbol}&start_date=${from}&end_date=${to}&token=${encodeURIComponent(token)}`;
     const resp = await fetch(url);
     if (!resp.ok) { throw new Error(`FinMind HTTP ${resp.status}`); }
     const json = await resp.json() as FinMindResponse<FinMindQuoteRow>;
@@ -299,6 +303,7 @@ export class MarketDataService {
   private toFinnhubResolution(interval: string): string {
     const map: Record<string, string> = {
       '1D': 'D', '4H': '240', '1H': '60', '15m': '15', '5m': '5', '1m': '1',
+      '1W': 'W', '1M': 'M', '1Y': 'M',
     };
     return map[interval] ?? 'D';
   }

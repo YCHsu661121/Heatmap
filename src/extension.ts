@@ -49,8 +49,21 @@ export function activate(context: vscode.ExtensionContext) {
     }),
 
     // ── 指令：刷新 ────────────────────────────────────────────────────────────
-    vscode.commands.registerCommand('stockHeatmap.refresh', () => {
+    vscode.commands.registerCommand('stockHeatmap.refresh', async () => {
       watchlistProvider.refresh();
+      const panel = DashboardPanel.current;
+      if (panel) {
+        panel.showLoading('刷新熱力圖中…');
+        const [tw, us] = await Promise.allSettled([
+          marketData.getHeatmap('TW', 'sector'),
+          marketData.getHeatmap('US', 'sector'),
+        ]);
+        const heatmap = [
+          ...(tw.status === 'fulfilled' ? tw.value : []),
+          ...(us.status === 'fulfilled' ? us.value : []),
+        ];
+        panel.updateHeatmap(heatmap);
+      }
     }),
 
     // ── 指令：加入自選股 ─────────────────────────────────────────────────────
@@ -218,7 +231,10 @@ export function activate(context: vscode.ExtensionContext) {
     try {
       // 依據 timeframe 計算 from/to
       const to = new Date().toISOString().slice(0, 10);
-      const daysBack: Record<string, number> = { '1D': 120, '4H': 30, '1H': 7, '15m': 2 };
+      const daysBack: Record<string, number> = {
+        '1D': 120, '4H': 30, '1H': 7, '15m': 2,
+        '1W': 730, '1M': 1825, '1Y': 3650,
+      };
       const fromDate = new Date(Date.now() - (daysBack[timeframe] ?? 120) * 86_400_000)
         .toISOString().slice(0, 10);
 

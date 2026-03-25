@@ -1,18 +1,42 @@
 .git
+.gitignore
 .vscode/**
 .vscode-test/**
 node_modules/**
 src/**
 out/test/**
-**/*.map
 **/*.ts
-!out/**
 **/*.vsix
 .DS_Store
 Thumbs.db
 backend/**
+nginx/**
 docs/**
 tsconfig.json
 .eslintrc.json
 compile_errors.txt
 *.log
+
+# Build / Docker 工具
+Dockerfile
+.dockerignore
+docker-compose.yml
+build.bat
+npm.bat
+
+# 草稿文件
+ToDo.md
+teamscontext.md
+
+# CI
+.github/**
+
+# out/ 只保留 extension.js，排除 tsc 個別輸出與 source map
+out/alerts/**
+out/analysis/**
+out/services/**
+out/storage/**
+out/types/**
+out/views/**
+out/test/**
+out/**/*.map
