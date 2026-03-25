@@ -16,21 +16,18 @@ echo.
 
 :: 1. Check Docker
 where docker >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
+if errorlevel 1 (
     echo [ERROR] Docker not found. Please install Docker Desktop.
     pause & exit /b 1
 )
 
 :: 2. Create output dir
-if not exist "%OUTPUT_DIR%" (
-    mkdir "%OUTPUT_DIR%"
-    echo [INFO] Created output dir: %OUTPUT_DIR%
-)
+if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 
 :: 3. Build Docker image
 echo [STEP 1/3] Building Docker image "%IMAGE_NAME%" ...
 docker build --target builder -t %IMAGE_NAME% "%WORKDIR%"
-if %ERRORLEVEL% NEQ 0 (
+if errorlevel 1 (
     echo [ERROR] Docker build failed.
     pause & exit /b 1
 )
@@ -39,41 +36,43 @@ if %ERRORLEVEL% NEQ 0 (
 echo [STEP 2/3] Copying .vsix from container ...
 docker rm -f %CONTAINER_NAME% >nul 2>&1
 docker create --name %CONTAINER_NAME% %IMAGE_NAME% >nul
-if %ERRORLEVEL% NEQ 0 (
+if errorlevel 1 (
     echo [ERROR] Failed to create temporary container.
     pause & exit /b 1
 )
 
 docker cp %CONTAINER_NAME%:/dist/%VSIX_NAME% "%OUTPUT_DIR%\%VSIX_NAME%"
-if %ERRORLEVEL% NEQ 0 (
+if errorlevel 1 (
     echo [ERROR] Failed to copy .vsix.
     docker rm -f %CONTAINER_NAME% >nul 2>&1
     pause & exit /b 1
 )
 
-:: Cleanup
 docker rm -f %CONTAINER_NAME% >nul 2>&1
 
 :: 5. Done
 echo [STEP 3/3] Done!
 echo.
-echo [OK] .vsix location: %OUTPUT_DIR%\%VSIX_NAME%
+echo [OK] .vsix: %OUTPUT_DIR%\%VSIX_NAME%
 echo.
 
 :: 6. Offer to install
 set /p INSTALL_NOW=Install to VS Code now? (Y/N): 
-if /i "!INSTALL_NOW!"=="Y" (
-    where code >nul 2>&1
-    if %ERRORLEVEL% EQU 0 (
-        echo [INFO] Installing extension ...
-        code --install-extension "%OUTPUT_DIR%\%VSIX_NAME%" --force
-        echo [INFO] Done. Please reload VS Code (Ctrl+Shift+P - Reload Window).
-    ) else (
-        echo [WARN] "code" command not found. Install manually:
-        echo        code --install-extension "%OUTPUT_DIR%\%VSIX_NAME%"
-    )
-)
+if /i "!INSTALL_NOW!" NEQ "Y" goto :end
 
+where code >nul 2>&1
+if errorlevel 1 goto :no_code
+
+echo [INFO] Installing extension ...
+code --install-extension "%OUTPUT_DIR%\%VSIX_NAME%" --force
+echo [INFO] Done. Reload VS Code (Ctrl+Shift+P - Reload Window).
+goto :end
+
+:no_code
+echo [WARN] "code" command not found. Install manually:
+echo        code --install-extension "%OUTPUT_DIR%\%VSIX_NAME%"
+
+:end
 echo.
 pause
 endlocal
