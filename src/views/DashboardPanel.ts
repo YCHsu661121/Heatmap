@@ -219,10 +219,10 @@ export class DashboardPanel {
 <div id="toolbar">
   <input id="symbol-input" type="text" placeholder="2330 / AAPL" />
   <select id="timeframe-select">
-    <option value="1D">1D</option>
-    <option value="4H">4H</option>
-    <option value="1H">1H</option>
-    <option value="15m">15m</option>
+    <option value="1D">日線</option>
+    <option value="4H">4小時</option>
+    <option value="1H">1小時</option>
+    <option value="15m">15分鐘</option>
   </select>
   <button class="btn" id="btn-load">載入</button>
   <button class="btn" id="btn-refresh">刷新</button>
@@ -390,11 +390,12 @@ export class DashboardPanel {
     });
 
     // 顯示訊號 badge
+    const actionMap = { BUY: '買入', SELL: '賣出', WATCH: '觀望' };
     const badge = $('signal-badge');
     if (signal) {
-      const map = { BUY: 'signal-buy', SELL: 'signal-sell', WATCH: 'signal-watch' };
-      badge.className = 'signal-badge ' + (map[signal.action] || '');
-      badge.textContent = signal.action + ' (' + Math.round(signal.confidence * 100) + '%)';
+      const clsMap = { BUY: 'signal-buy', SELL: 'signal-sell', WATCH: 'signal-watch' };
+      badge.className = 'signal-badge ' + (clsMap[signal.action] || '');
+      badge.textContent = (actionMap[signal.action] || signal.action) + ' ' + Math.round(signal.confidence * 100) + '%';
       badge.style.display = 'block';
     } else {
       badge.style.display = 'none';
@@ -411,12 +412,12 @@ export class DashboardPanel {
   // ── 技術指標列 ────────────────────────────────────────────────────────────
   function renderIndicators(ind) {
     const items = [
-      { label: 'SMA5',  value: fmt(ind.sma5) },
-      { label: 'SMA20', value: fmt(ind.sma20) },
-      { label: 'RSI14', value: fmt(ind.rsi14, 1) },
-      { label: 'MACD',  value: fmt(ind.macd, 4) },
-      { label: 'BB↑',   value: fmt(ind.bollingerUpper) },
-      { label: 'BB↓',   value: fmt(ind.bollingerLower) },
+      { label: '均線5',    value: fmt(ind.sma5) },
+      { label: '均線20',   value: fmt(ind.sma20) },
+      { label: 'RSI',     value: fmt(ind.rsi14, 1) },
+      { label: 'MACD',    value: fmt(ind.macd, 4) },
+      { label: '布林上軌', value: fmt(ind.bollingerUpper) },
+      { label: '布林下軌', value: fmt(ind.bollingerLower) },
     ];
     $('indicators-grid').innerHTML = items.map(it =>
       \`<div class="ind-item"><div class="ind-label">\${it.label}</div><div class="ind-value">\${it.value}</div></div>\`
@@ -466,7 +467,10 @@ export class DashboardPanel {
   // ── LLM 建議（M5 擴展）────────────────────────────────────────────────────
   function renderRecommendation(symbol, rec) {
     if (!rec) { return; }
-    setStatus(\`[\${symbol}] LLM: \${rec.action} (\${Math.round((rec.confidence||0)*100)}%) — \${(rec.reasons||[]).join(' / ')}\`);
+    const actionMap = { BUY: '買入', SELL: '賣出', WATCH: '觀望' };
+    const action = actionMap[rec.action] || rec.action;
+    const reasons = (rec.reasons || (rec.reason ? [rec.reason] : [])).join(' / ');
+    setStatus('[' + symbol + '] AI建議：' + action + '（' + Math.round((rec.confidence||0)*100) + '%）' + (reasons ? ' — ' + reasons : ''));
   }
 })();
 </script>
