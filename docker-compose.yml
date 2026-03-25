@@ -1,0 +1,37 @@
+services:
+  # ── 開發服務：互動式 npm 指令（npm install / compile / watch）──
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    image: heatmap-vscode-dev:latest
+    container_name: heatmap-dev
+    working_dir: /workspace
+    volumes:
+      - .:/workspace                    # 原始碼雙向掛載
+      - heatmap_node_modules:/workspace/node_modules  # node_modules 留在容器內
+    # 預設執行 compile，可用 docker compose run --rm dev <cmd> 覆寫
+    command: ["npm", "run", "compile"]
+    # 不常駐，run 完即退出
+    restart: "no"
+
+  # ── 建置服務：執行完後自動退出，.vsix 寫入 ./dist ──────────
+  builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder          # 只跑 builder stage
+    image: heatmap-vscode-builder:latest
+    container_name: heatmap-builder
+    volumes:
+      - ./dist:/dist           # 成品輸出到主機 ./dist 目錄
+    command:
+      - sh
+      - -c
+      - "vsce package --no-git-tag-version --allow-missing-repository --out /dist/heatmap.vsix && echo 'Build Success: /dist/heatmap.vsix'"
+    # 執行完畢即停止，不保持常駐
+    restart: "no"
+
+volumes:
+  heatmap_node_modules:

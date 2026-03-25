@@ -1,0 +1,28 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+httpx==0.27.0
+python-dotenv==1.0.1
+
+# 技術指標計算
+pandas==2.2.2
+numpy==1.26.4
+pandas-ta==0.3.14b0
+
+# 市場資料
+finnhub-python==2.4.20
+# FinMind（台股）
+FinMind==1.6.4
+
+# 新聞
+feedparser==6.0.11
+newspaper3k==0.2.8
+
+# LLM
+openai==1.35.7
+ollama==0.2.1
+
+# 工具
+pydantic==2.7.4
+pydantic-settings==2.3.4
+cachetools==5.3.3
+tenacity==8.4.2
