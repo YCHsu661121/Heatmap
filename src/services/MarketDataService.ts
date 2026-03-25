@@ -24,6 +24,32 @@ interface FinMindResponse<T> {
 interface FinMindStockInfoRow {
   stock_id: string;
   stock_name: string;
+  industry_category?: string; // 產業別
+  type?: string;              // '上市' | '上櫃'
+}
+interface TwseStockDayAllRow {
+  Code: string;
+  Name: string;
+  TradeVolume: string;
+  TradeValue: string;
+  OpeningPrice: string;
+  HighestPrice: string;
+  LowestPrice: string;
+  ClosingPrice: string;
+  Change: string;
+  Transaction: string;
+}
+interface TpexMainboardQuoteRow {
+  SecuritiesCompanyCode: string;
+  CompanyName: string;
+  Close: string;
+  Change: string;
+  Open: string;
+  High: string;
+  Low: string;
+  TradingShares: string;
+  TransactionAmount: string;
+  TransactionNumber: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -65,11 +91,14 @@ interface FinnhubCandle {
  */
 export class MarketDataService {
   private readonly cache = new Map<string, { data: unknown; expiry: number }>();
+  private _lastHeatmapMarketUsedFallback = false;
 
   private static readonly FINMIND_BASE = 'https://api.finmindtrade.com/api/v4/data';
   private static readonly FINNHUB_BASE = 'https://finnhub.io/api/v1';
   /** TWSE 代碼查詢（免 Key，回傳 suggestions 陣列，每格格式："2330     台積電"） */
   private static readonly TWSE_CODE_QUERY = 'https://www.twse.com.tw/zh/api/codeQuery';
+  private static readonly TWSE_STOCK_DAY_ALL = 'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL';
+  private static readonly TPEX_MAINBOARD_QUOTES = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes';
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -176,6 +205,149 @@ export class MarketDataService {
       changePercent: q.changePercent,
       score: Math.round(q.changePercent * 10) / 10,
     }));
+  }
+
+  /** 取得全台股今日行情（依成交額排序，最多 300 檔） */
+  async getHeatmapMarket(_market: 'TW'): Promise<HeatmapItem[]> {
+    const today = new Date().toISOString().slice(0, 10);
+    const cacheKey = `heatmap-market:TW:${today}`;
+    const cached = this.getCached<HeatmapItem[]>(cacheKey);
+    if (cached) {
+      this._lastHeatmapMarketUsedFallback = false;
+      return cached;
+    }
+
+    const infoMap = await this.getTWStockInfoMap();
+    const [twseResult, tpexResult] = await Promise.all([
+      this.fetchTwseStockDayAllWithFallback(),
+      this.fetchTpexMainboardQuotesWithFallback(),
+    ]);
+    this._lastHeatmapMarketUsedFallback = twseResult.usedFallback || tpexResult.usedFallback;
+
+    const items = [
+      ...twseResult.rows.map((row) => this.mapTwseHeatmapRow(row, infoMap)),
+      ...tpexResult.rows.map((row) => this.mapTpexHeatmapRow(row, infoMap)),
+    ]
+      .filter((item): item is HeatmapItem => item !== undefined)
+      .sort((a, b) => (b.turnover ?? 0) - (a.turnover ?? 0))
+      .slice(0, 300);
+
+    this.setCached(cacheKey, items, 300);
+    return items;
+  }
+
+  didLastHeatmapMarketUseFallback(): boolean {
+    return this._lastHeatmapMarketUsedFallback;
+  }
+
+  /** 台股代碼資訊對照表（中文名稱 + 產業 + 市場別）Quick cache 1 hour */
+  private async getTWStockInfoMap(): Promise<Map<string, FinMindStockInfoRow>> {
+    const cacheKey = 'stock-info-map:TW';
+    const cached = this.getCached<Map<string, FinMindStockInfoRow>>(cacheKey);
+    if (cached) { return cached; }
+    const token = this.getApiKey('TW');
+    const url = `${MarketDataService.FINMIND_BASE}?dataset=TaiwanStockInfo&token=${encodeURIComponent(token)}`;
+    const resp = await fetch(url).catch(() => null);
+    if (!resp || !resp.ok) { return new Map(); }
+    const json = await resp.json() as FinMindResponse<FinMindStockInfoRow>;
+    const map = new Map<string, FinMindStockInfoRow>();
+    (json.data ?? []).forEach(row => map.set(row.stock_id, row));
+    this.setCached(cacheKey, map, 3600);
+    return map;
+  }
+
+  private async fetchTwseStockDayAll(): Promise<TwseStockDayAllRow[]> {
+    const resp = await fetch(MarketDataService.TWSE_STOCK_DAY_ALL).catch(() => null);
+    if (!resp || !resp.ok) { return []; }
+    const json = await resp.json() as TwseStockDayAllRow[];
+    return Array.isArray(json) ? json : [];
+  }
+
+  private async fetchTwseStockDayAllWithFallback(): Promise<{ rows: TwseStockDayAllRow[]; usedFallback: boolean }> {
+    const cacheKey = 'heatmap-source:TWSE';
+    const rows = await this.fetchTwseStockDayAll();
+    if (rows.length > 0) {
+      this.setCached(cacheKey, rows, 3600);
+      return { rows, usedFallback: false };
+    }
+    return { rows: this.getCached<TwseStockDayAllRow[]>(cacheKey) ?? [], usedFallback: true };
+  }
+
+  private async fetchTpexMainboardQuotes(): Promise<TpexMainboardQuoteRow[]> {
+    const resp = await fetch(MarketDataService.TPEX_MAINBOARD_QUOTES).catch(() => null);
+    if (!resp || !resp.ok) { return []; }
+    const json = await resp.json() as TpexMainboardQuoteRow[];
+    return Array.isArray(json) ? json : [];
+  }
+
+  private async fetchTpexMainboardQuotesWithFallback(): Promise<{ rows: TpexMainboardQuoteRow[]; usedFallback: boolean }> {
+    const cacheKey = 'heatmap-source:TPEX';
+    const rows = await this.fetchTpexMainboardQuotes();
+    if (rows.length > 0) {
+      this.setCached(cacheKey, rows, 3600);
+      return { rows, usedFallback: false };
+    }
+    return { rows: this.getCached<TpexMainboardQuoteRow[]>(cacheKey) ?? [], usedFallback: true };
+  }
+
+  private mapTwseHeatmapRow(
+    row: TwseStockDayAllRow,
+    infoMap: Map<string, FinMindStockInfoRow>,
+  ): HeatmapItem | undefined {
+    const symbol = row.Code?.trim();
+    if (!symbol || !/^\d{4,6}$/.test(symbol)) { return undefined; }
+
+    const close = this.parseMarketNumber(row.ClosingPrice);
+    const turnover = this.parseMarketNumber(row.TradeValue);
+    const volume = this.parseMarketNumber(row.TradeVolume);
+    const change = this.parseSignedMarketNumber(row.Change);
+    if (close <= 0 || turnover <= 0 || volume <= 0 || !Number.isFinite(change)) { return undefined; }
+
+    const prevClose = close - change;
+    if (prevClose <= 0) { return undefined; }
+
+    const info = infoMap.get(symbol);
+    const changePercent = (change / prevClose) * 100;
+    return {
+      sector: info?.industry_category || '其他',
+      symbol,
+      name: info?.stock_name || row.Name?.trim() || symbol,
+      changePercent,
+      score: Math.round(changePercent * 10) / 10,
+      turnover,
+      volume,
+      market: 'TSE',
+    };
+  }
+
+  private mapTpexHeatmapRow(
+    row: TpexMainboardQuoteRow,
+    infoMap: Map<string, FinMindStockInfoRow>,
+  ): HeatmapItem | undefined {
+    const symbol = row.SecuritiesCompanyCode?.trim();
+    if (!symbol || !/^\d{4,6}$/.test(symbol)) { return undefined; }
+
+    const close = this.parseMarketNumber(row.Close);
+    const turnover = this.parseMarketNumber(row.TransactionAmount);
+    const volume = this.parseMarketNumber(row.TradingShares);
+    const change = this.parseSignedMarketNumber(row.Change);
+    if (close <= 0 || turnover <= 0 || volume <= 0 || !Number.isFinite(change)) { return undefined; }
+
+    const prevClose = close - change;
+    if (prevClose <= 0) { return undefined; }
+
+    const info = infoMap.get(symbol);
+    const changePercent = (change / prevClose) * 100;
+    return {
+      sector: info?.industry_category || '其他',
+      symbol,
+      name: info?.stock_name || row.CompanyName?.trim() || symbol,
+      changePercent,
+      score: Math.round(changePercent * 10) / 10,
+      turnover,
+      volume,
+      market: 'OTC',
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -306,6 +478,26 @@ export class MarketDataService {
       '1W': 'W', '1M': 'M', '1Y': 'M',
     };
     return map[interval] ?? 'D';
+  }
+
+  private parseMarketNumber(value: string | number | undefined): number {
+    if (typeof value === 'number') { return Number.isFinite(value) ? value : NaN; }
+    if (!value) { return NaN; }
+    const normalized = value.replace(/,/g, '').trim();
+    if (!normalized || normalized === '---' || normalized === '----') { return NaN; }
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+
+  private parseSignedMarketNumber(value: string | number | undefined): number {
+    if (typeof value === 'number') { return Number.isFinite(value) ? value : NaN; }
+    if (!value) { return NaN; }
+    const normalized = value.replace(/,/g, '').trim();
+    if (!normalized || normalized === '---' || normalized === '----') { return NaN; }
+    const matched = normalized.match(/[+-]?\d+(?:\.\d+)?/);
+    if (!matched) { return NaN; }
+    const parsed = Number(matched[0]);
+    return Number.isFinite(parsed) ? parsed : NaN;
   }
 
   private getApiKey(market: 'TW' | 'US'): string {

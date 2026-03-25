@@ -83,8 +83,8 @@ export class DashboardPanel {
   // 資料推送：Extension → Webview
   // ---------------------------------------------------------------------------
 
-  updateHeatmap(items: HeatmapItem[]): void {
-    this.post({ type: 'heatmap', data: items });
+  updateHeatmap(items: HeatmapItem[], source: 'watchlist' | 'market' = 'watchlist', meta?: { stale?: boolean }): void {
+    this.post({ type: 'heatmap', data: items, source, stale: meta?.stale === true });
   }
 
   updateChart(symbol: string, candles: Candle[], signal?: SignalResult): void {
@@ -208,9 +208,9 @@ export class DashboardPanel {
              padding: 3px 4px; border-radius: 3px; cursor: pointer; overflow: hidden;
              min-width: 48px; min-height: 40px; transition: opacity 0.1s; }
   .hm-cell:hover { opacity: 0.8; }
-  .hm-cell .hm-sym  { font-size: 11px; font-weight: 700; line-height: 1.3; }
-  .hm-cell .hm-name { font-size: 9px; opacity: 0.85; line-height: 1.2; white-space: nowrap;
+  .hm-cell .hm-name { font-size: 11px; font-weight: 700; line-height: 1.3; white-space: nowrap;
                       overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .hm-cell .hm-sym  { font-size: 9px; opacity: 0.75; line-height: 1.2; }
   .hm-cell .hm-pct  { font-size: 11px; font-weight: 600; line-height: 1.3; }
 
   /* Chart */
@@ -281,7 +281,12 @@ export class DashboardPanel {
     <span id="heatmap-status"></span>
   </div>
   <div class="hm-filter-row">
-    <span class="hm-filter-label">≡ 熱力圖條件：</span>
+    <span class="hm-filter-label">資料：</span>
+    <div class="hm-btn-group">
+      <button class="hm-btn active" data-hm-filter="source" data-hm-val="watchlist">自選股</button>
+      <button class="hm-btn"        data-hm-filter="source" data-hm-val="market">全台股</button>
+    </div>
+    <span class="hm-filter-label" style="margin-left:8px">條件：</span>
   </div>
   <div class="hm-filter-row">
     <div class="hm-btn-group">
@@ -312,7 +317,7 @@ export class DashboardPanel {
       <button class="hm-btn"        data-hm-filter="period" data-hm-val="240D">240日</button>
     </div>
   </div>
-  <div id="heatmap-grid"><span style="color:var(--vscode-descriptionForeground)">無自選股資料</span></div>
+  <div id="heatmap-grid"><span style="color:var(--vscode-descriptionForeground)">載入中…</span></div>
 </div>
 
 <!-- Main Grid -->
@@ -360,16 +365,19 @@ export class DashboardPanel {
   const cls = (n) => n > 0 ? 'up-val' : n < 0 ? 'down-val' : '';
 
   // ── Toolbar ───────────────────────────────────────────────────────────────
-  $('btn-load').addEventListener('click', () => {
-    const sym = $('symbol-input').value.trim().toUpperCase();
-    const tf  = $('timeframe-select').value;
-    if (!sym) { return; }
-    vscode.postMessage({ command: 'loadSymbol', payload: { symbol: sym, timeframe: tf } });
-    setStatus('載入 ' + sym + ' …');
+  let _currentSym = '';
+
+  // timeframe 切換時自動重載當前股票
+  $('timeframe-select').addEventListener('change', () => {
+    if (_currentSym) { loadSymbol(_currentSym); }
   });
 
   $('btn-refresh').addEventListener('click', () => {
-    vscode.postMessage({ command: 'refresh', payload: null });
+    if (_currentSym) {
+      loadSymbol(_currentSym);
+    } else {
+      vscode.postMessage({ command: 'refresh', payload: null });
+    }
     setStatus('刷新中…');
   });
 
@@ -381,7 +389,12 @@ export class DashboardPanel {
     switch (msg.type) {
       case 'loading':   showOverlay(msg.message); break;
       case 'error':     hideOverlay(); setStatus('⚠ ' + msg.message); break;
-      case 'heatmap':   renderHeatmap(msg.data); hideOverlay(); break;
+      case 'heatmap': {
+        const _src = msg.source || 'watchlist';
+        _hmCache[_src] = { items: msg.data, stale: msg.stale === true };
+        if (_hmState.source === _src) { renderHeatmap(msg.data, msg.stale === true); hideOverlay(); }
+        break;
+      }
       case 'chart':     renderChart(msg.symbol, msg.candles, msg.signal); hideOverlay(); break;
       case 'news':      renderNews(msg.data); break;
       case 'financials': renderFinancials(msg.data); break;
@@ -397,8 +410,8 @@ export class DashboardPanel {
   function hideOverlay() { $('overlay').classList.remove('visible'); }
 
   // ── 熱力圖 ────────────────────────────────────────────────────────────────
-  let _hmData  = null;
-  const _hmState = { market: 'ALL', groupBy: 'none', display: 'stock', sizeBy: 'marketCap', period: '1D' };
+  const _hmCache = { watchlist: null, market: null };
+  const _hmState = { source: 'watchlist', market: 'ALL', groupBy: 'none', display: 'stock', sizeBy: 'marketCap', period: '1D' };
 
   document.querySelectorAll('[data-hm-filter]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -407,7 +420,25 @@ export class DashboardPanel {
       _hmState[filter] = val;
       btn.closest('.hm-btn-group').querySelectorAll('.hm-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      if (_hmData) { renderHeatmap(_hmData); }
+      if (filter === 'source') {
+        // 切換資料來源時自動調整 sizeBy：全台股用成交額，自選股用市值
+        const autoSizeBy = val === 'market' ? 'turnover' : 'marketCap';
+        _hmState.sizeBy = autoSizeBy;
+        document.querySelectorAll('[data-hm-filter="sizeBy"]').forEach(b => b.classList.remove('active'));
+        const sbBtn = document.querySelector('[data-hm-filter="sizeBy"][data-hm-val="' + autoSizeBy + '"]');
+        if (sbBtn) { sbBtn.classList.add('active'); }
+        const cache = _hmCache[val];
+        if (cache) {
+          renderHeatmap(cache.items, cache.stale === true);
+        } else {
+          $('heatmap-grid').innerHTML = '<span style="color:var(--vscode-descriptionForeground)">載入' + (val === 'market' ? '全台股' : '自選股') + '中…</span>';
+          $('heatmap-status').textContent = '';
+          vscode.postMessage({ command: 'loadHeatmap', payload: { source: val } });
+        }
+      } else {
+        const d = _hmCache[_hmState.source];
+        if (d) { renderHeatmap(d.items, d.stale === true); }
+      }
     });
   });
 
@@ -438,7 +469,7 @@ export class DashboardPanel {
   function hmSize(item) {
     const v = _hmState.sizeBy === 'turnover' ? item.turnover
             : _hmState.sizeBy === 'volume'   ? item.volume
-            : item.marketCap;
+            : (item.marketCap ?? item.turnover); // 全台股無 marketCap 時 fallback 成交額
     return (v != null && v > 0) ? Number(v) : 1;
   }
 
@@ -452,14 +483,14 @@ export class DashboardPanel {
     return \`<div class="hm-cell" style="flex:\${flexGrow} 1 0%;background:\${bg};color:\${fg}"
           title="[\${sym}] \${name}  \${sign}\${pct.toFixed(2)}%"
           onclick="loadSymbol('\${sym}')">
+      <span class="hm-name">\${name || sym}</span>
       <span class="hm-sym">\${sym}</span>
-      <span class="hm-name">\${name}</span>
       <span class="hm-pct">\${sign}\${pct.toFixed(2)}%</span>
     </div>\`;
   }
 
-  function renderHeatmap(items) {
-    _hmData = items;
+  function renderHeatmap(items, stale) {
+    _hmCache[_hmState.source] = { items, stale: stale === true };
     const grid = $('heatmap-grid');
     if (!items || items.length === 0) {
       grid.innerHTML = '<span style="color:var(--vscode-descriptionForeground)">無資料</span>';
@@ -515,12 +546,20 @@ export class DashboardPanel {
 
     const up   = list.filter(i => hmPct(i) > 0).length;
     const dn   = list.filter(i => hmPct(i) < 0).length;
-    $('heatmap-status').textContent = \`共 \${list.length} 檔　\${up > 0 ? '▲' + up : ''}　\${dn > 0 ? '▼' + dn : ''}\`;
+    const staleNote = _hmState.source === 'market' && stale ? '　部分資料為快取' : '';
+    $('heatmap-status').textContent = '共 ' + list.length + ' 檔　'
+      + (up > 0 ? '▲' + up : '') + '　'
+      + (dn > 0 ? '▼' + dn : '')
+      + staleNote;
   }
 
   function loadSymbol(sym) {
-    $('symbol-input').value = sym;
-    $('btn-load').click();
+    if (!sym) { return; }
+    _currentSym = sym.toUpperCase();
+    $('current-sym').textContent = _currentSym;
+    const tf = $('timeframe-select').value;
+    vscode.postMessage({ command: 'loadSymbol', payload: { symbol: _currentSym, timeframe: tf } });
+    setStatus('載入 ' + _currentSym + ' …');
   }
 
   // ── K 線圖（Canvas 極簡實作） ─────────────────────────────────────────────

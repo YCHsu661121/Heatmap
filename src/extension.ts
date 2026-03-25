@@ -41,7 +41,7 @@ export function activate(context: vscode.ExtensionContext) {
             ...(tw.status === 'fulfilled' ? tw.value : []),
             ...(us.status === 'fulfilled' ? us.value : []),
           ];
-          panel.updateHeatmap(heatmap);
+          panel.updateHeatmap(heatmap, 'watchlist');
         } catch (e: unknown) {
           panel.showError(`熱力圖載入失敗：${String(e)}`);
         }
@@ -62,11 +62,43 @@ export function activate(context: vscode.ExtensionContext) {
           ...(tw.status === 'fulfilled' ? tw.value : []),
           ...(us.status === 'fulfilled' ? us.value : []),
         ];
-        panel.updateHeatmap(heatmap);
+        panel.updateHeatmap(heatmap, 'watchlist');
       }
     }),
 
-    // ── 指令：加入自選股 ─────────────────────────────────────────────────────
+    // ── 指令：切換熱力圖資料來源（Webview loadHeatmap）─────────────────────
+    vscode.commands.registerCommand('stockHeatmap.loadHeatmap',
+      async (payload: { source?: 'watchlist' | 'market' }) => {
+        const panel = DashboardPanel.current;
+        if (!panel) { return; }
+        const source = payload?.source ?? 'watchlist';
+        if (source === 'market') {
+          panel.showLoading('載入全台股熱力圖…');
+          try {
+            const items = await marketData.getHeatmapMarket('TW');
+            panel.updateHeatmap(items, 'market', { stale: marketData.didLastHeatmapMarketUseFallback() });
+          } catch (e: unknown) {
+            panel.showError(`全台股熱力圖載入失敗：${String(e)}`);
+          }
+        } else {
+          panel.showLoading('載入自選股熱力圖…');
+          try {
+            const [tw, us] = await Promise.allSettled([
+              marketData.getHeatmap('TW', 'sector'),
+              marketData.getHeatmap('US', 'sector'),
+            ]);
+            const items = [
+              ...(tw.status === 'fulfilled' ? tw.value : []),
+              ...(us.status === 'fulfilled' ? us.value : []),
+            ];
+            panel.updateHeatmap(items, 'watchlist');
+          } catch (e: unknown) {
+            panel.showError(`自選股熱力圖載入失敗：${String(e)}`);
+          }
+        }
+      }),
+
+    // ── 指令：加入自選股 ────────────────────────────────────────────
     vscode.commands.registerCommand('stockHeatmap.addSymbol', async () => {
       // 1) 股票代碼
       const sym = await vscode.window.showInputBox({
