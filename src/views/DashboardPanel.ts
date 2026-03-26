@@ -201,11 +201,17 @@ export class DashboardPanel {
 
   /* Heatmap Grid */
   #heatmap-grid { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr));
-                  grid-auto-flow: dense; grid-auto-rows: 18px; gap: 2px; margin-top: 4px; min-height: 80px; }
+                  grid-auto-flow: dense; grid-auto-rows: var(--hm-row-h, 18px); gap: 2px;
+                  margin-top: 4px; min-height: 80px; overflow-y: auto; max-height: 560px; }
+  .hm-grid-wrap { position: relative; }
+  .hm-zoom-hint { position: absolute; right: 6px; top: 6px; font-size: 10px;
+                  color: var(--vscode-descriptionForeground); pointer-events: none;
+                  opacity: 0; transition: opacity 0.4s; }
+  .hm-grid-wrap:hover .hm-zoom-hint { opacity: 1; }
   .hm-group { width: 100%; margin-bottom: 2px; }
   .hm-group-label { font-size: 10px; color: var(--vscode-descriptionForeground); padding: 1px 4px; margin-bottom: 2px; }
   .hm-group-cells { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr));
-                    grid-auto-flow: dense; grid-auto-rows: 18px; gap: 2px; }
+                    grid-auto-flow: dense; grid-auto-rows: var(--hm-row-h, 18px); gap: 2px; }
   .hm-cell { display: flex; flex-direction: column; align-items: center; justify-content: center;
              padding: 3px 4px; border-radius: 3px; cursor: pointer; overflow: hidden;
              min-width: 0; min-height: 0; text-align: center; transition: opacity 0.1s;
@@ -227,7 +233,9 @@ export class DashboardPanel {
   }
 
   /* Chart */
-  #chart-container { width: 100%; height: 260px; background: var(--bg); position: relative; }
+  #chart-container { width: 100%; height: 260px; background: var(--bg); position: relative;
+                     cursor: grab; user-select: none; }
+  #chart-container.dragging { cursor: grabbing; }
   #chart-canvas { display: block; width: 100%; height: 100%; }
   #signal-badge { position: absolute; top: 8px; right: 8px; padding: 4px 10px; border-radius: 12px;
                   font-size: 12px; font-weight: bold; display: none; }
@@ -330,7 +338,10 @@ export class DashboardPanel {
       <button class="hm-btn"        data-hm-filter="period" data-hm-val="240D">240日</button>
     </div>
   </div>
-  <div id="heatmap-grid"><span style="color:var(--vscode-descriptionForeground)">載入中…</span></div>
+  <div class="hm-grid-wrap">
+    <div id="heatmap-grid"><span style="color:var(--vscode-descriptionForeground)">載入中…</span></div>
+    <div class="hm-zoom-hint">🔍 滾輪縮放</div>
+  </div>
 </div>
 
 <!-- Main Grid -->
@@ -448,6 +459,17 @@ export class DashboardPanel {
   // ── 熱力圖 ────────────────────────────────────────────────────────────────
   const _hmCache = { watchlist: null, market: null };
   const _hmState = { source: 'watchlist', market: 'ALL', groupBy: 'none', display: 'stock', sizeBy: 'marketCap', period: '1D' };
+  let _hmZoom = 1.0;  // 熱力圖格子縮放倍率
+
+  // 熱力圖滾輪縮放
+  $('heatmap-grid').addEventListener('wheel', e => {
+    e.preventDefault();
+    _hmZoom = Math.min(4.0, Math.max(0.4, _hmZoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
+    const rowH = Math.round(18 * _hmZoom);
+    $('heatmap-grid').style.setProperty('--hm-row-h', rowH + 'px');
+    document.querySelectorAll('.hm-group-cells').forEach(el =>
+      el.style.setProperty('--hm-row-h', rowH + 'px'));
+  }, { passive: false });
 
   document.querySelectorAll('[data-hm-filter]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -612,6 +634,42 @@ export class DashboardPanel {
   // 使用 Canvas 手繪 OHLC + 趨勢線（SMA5/SMA20/布林通道），避免外部依賴
   let _lastChart = null;
   let _resizeTimer = null;
+  let _chartViewport = { visibleN: 100, offset: 0 };  // 可見蠟燭數 + 右端偏移
+  let _dragChart = null;  // { startX, startOffset }
+
+  // 滾輪縮放（改變可見蠟燭數）
+  $('chart-container').addEventListener('wheel', e => {
+    e.preventDefault();
+    if (!_lastChart || !_lastChart.candles.length) { return; }
+    const total = _lastChart.candles.length;
+    const step = Math.max(5, Math.round(_chartViewport.visibleN * 0.12));
+    _chartViewport.visibleN = e.deltaY < 0
+      ? Math.max(10, _chartViewport.visibleN - step)
+      : Math.min(total, _chartViewport.visibleN + step);
+    _chartViewport.offset = Math.max(0, Math.min(_chartViewport.offset, total - _chartViewport.visibleN));
+    renderChart(_lastChart.symbol, _lastChart.candles, _lastChart.signal);
+  }, { passive: false });
+
+  // 拖曳平移（左右拖移時間軸）
+  $('chart-container').addEventListener('mousedown', e => {
+    _dragChart = { startX: e.clientX, startOffset: _chartViewport.offset };
+    $('chart-container').classList.add('dragging');
+  });
+  const _endDragChart = () => {
+    _dragChart = null;
+    $('chart-container').classList.remove('dragging');
+  };
+  $('chart-container').addEventListener('mouseup', _endDragChart);
+  $('chart-container').addEventListener('mouseleave', _endDragChart);
+  $('chart-container').addEventListener('mousemove', e => {
+    if (!_dragChart || !_lastChart) { return; }
+    const total = _lastChart.candles.length;
+    const visN  = _chartViewport.visibleN;
+    const cw = (($('chart-container').clientWidth || 400) - 68) / visN; // approx px per candle
+    const delta = Math.round((_dragChart.startX - e.clientX) / cw);
+    _chartViewport.offset = Math.max(0, Math.min(_dragChart.startOffset + delta, total - visN));
+    renderChart(_lastChart.symbol, _lastChart.candles, _lastChart.signal);
+  });
 
   // 面板 resize 時重繪（debounce 100ms，避免拖拉時連續重繪）
   if (window.ResizeObserver) {
@@ -647,8 +705,14 @@ export class DashboardPanel {
       return;
     }
 
-    const n = Math.min(candles.length, 100); // 只顯示最後 100 根
-    const slice = candles.slice(-n);
+    // 根據 viewport 決定顯示哪段蠟燭（支援縮放＋拖曳平移）
+    const total = candles.length;
+    const visN   = Math.min(_chartViewport.visibleN, total);
+    const offset = Math.min(_chartViewport.offset, Math.max(0, total - visN));
+    const n = visN;
+    const slice = offset > 0
+      ? candles.slice(total - visN - offset, total - offset)
+      : candles.slice(-visN);
     const closes = slice.map(c => c.close);
     const highs  = slice.map(c => c.high);
     const lows   = slice.map(c => c.low);
