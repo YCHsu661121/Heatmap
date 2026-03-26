@@ -128,7 +128,7 @@
         },
         "stockHeatmap.refreshIntervalSec": {
           "type": "number",
-          "default": 60,
+          "default": 30,
           "minimum": 10,
           "description": "自動刷新間隔（秒，最小 10）"
         },

@@ -284,7 +284,8 @@ export class MarketDataService {
       .sort((a, b) => (b.turnover ?? 0) - (a.turnover ?? 0))
       .slice(0, 300);
 
-    this.setCached(cacheKey, items, 300);
+    const heatmapTtl = Math.max(30, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30));
+    this.setCached(cacheKey, items, heatmapTtl);
     return items;
   }
 
@@ -474,7 +475,8 @@ export class MarketDataService {
       updatedAt: new Date(last.date).toISOString(),
     };
 
-    this.setCached(cacheKey, quote, 60);
+    const quoteTtl = Math.max(10, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30));
+    this.setCached(cacheKey, quote, quoteTtl);
     return quote;
   }
 
@@ -498,7 +500,8 @@ export class MarketDataService {
         volume: this.parseMarketNumber(twseRow.TradeVolume),
         updatedAt: new Date().toISOString(),
       };
-      this.setCached(`quote:TW:${symbol}`, quote, 60);
+      const quoteTtl1 = Math.max(10, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30));
+      this.setCached(`quote:TW:${symbol}`, quote, quoteTtl1);
       return quote;
     }
     const tpexRow = tpexResult.rows.find(r => r.SecuritiesCompanyCode?.trim() === symbol);
@@ -515,7 +518,8 @@ export class MarketDataService {
         volume: this.parseMarketNumber(tpexRow.TradingShares),
         updatedAt: new Date().toISOString(),
       };
-      this.setCached(`quote:TW:${symbol}`, quote, 60);
+      const quoteTtl2 = Math.max(10, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30));
+      this.setCached(`quote:TW:${symbol}`, quote, quoteTtl2);
       return quote;
     }
     throw new Error(`No data for ${symbol} in TWSE/TPEX batch`);
@@ -602,7 +606,8 @@ export class MarketDataService {
       updatedAt: new Date(json.t * 1000).toISOString(),
     };
 
-    this.setCached(cacheKey, quote, 60);
+    const usTtl = Math.max(10, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30));
+    this.setCached(cacheKey, quote, usTtl);
     return quote;
   }
 

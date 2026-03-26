@@ -36,8 +36,26 @@ export class WatchlistProvider implements vscode.TreeDataProvider<WatchlistNode>
     private readonly marketDataService: MarketDataService,
   ) {
     this.loadQuotes();
-    this.timer = setInterval(() => this.loadQuotes(), 60_000);
+    this.startTimer();
     context.subscriptions.push({ dispose: () => clearInterval(this.timer) });
+    // 監聽使用者修改刷新間隔設定，即時套用新計時器
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration(e => {
+        if (e.affectsConfiguration('stockHeatmap.refreshIntervalSec')) {
+          clearInterval(this.timer);
+          this.startTimer();
+        }
+      }),
+    );
+  }
+
+  private getIntervalMs(): number {
+    const sec = vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30);
+    return Math.max(10, sec) * 1000;
+  }
+
+  private startTimer(): void {
+    this.timer = setInterval(() => this.loadQuotes(), this.getIntervalMs());
   }
 
   refresh(): void {
