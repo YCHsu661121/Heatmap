@@ -362,9 +362,10 @@ export class DashboardPanel {
   <!-- Financials -->
   <div class="card">
     <h2>財報摘要</h2>
+    <div id="financials-summary" style="font-size:12px;margin-bottom:6px;color:var(--vscode-descriptionForeground)"></div>
     <table id="financials-table">
-      <thead><tr><th>期別</th><th>營收</th><th>EPS</th><th>毛利率</th><th>YoY</th></tr></thead>
-      <tbody id="financials-body"><tr><td colspan="5" style="color:var(--vscode-descriptionForeground)">請先載入股票</td></tr></tbody>
+      <thead><tr><th>期別</th><th>營收(億)</th><th>EPS</th><th>毛利率</th><th>營收YoY</th><th>QoQ</th></tr></thead>
+      <tbody id="financials-body"><tr><td colspan="6" style="color:var(--vscode-descriptionForeground)">請先載入股票</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -867,19 +868,36 @@ export class DashboardPanel {
   // ── 財報 ──────────────────────────────────────────────────────────────────
   function renderFinancials(reports) {
     const tbody = $('financials-body');
+    const summary = $('financials-summary');
     if (!reports || reports.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--vscode-descriptionForeground)">無財報資料</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" style="color:var(--vscode-descriptionForeground)">無財報資料</td></tr>';
+      if (summary) { summary.textContent = ''; }
       return;
     }
-    tbody.innerHTML = reports.slice(-4).reverse().map(r => {
-      const rev = r.revenue ? (r.revenue / 1e8).toFixed(2) + ' 億' : '—';
-      const yoy = r.revenueYoY != null ? \`<span class="\${cls(r.revenueYoY)}">\${arrow(r.revenueYoY)}\${fmt(r.revenueYoY)}%</span>\` : '—';
+    const recent = reports.slice(-4).reverse();
+    // 顯示最新一期的 highlights 摘要
+    if (summary) {
+      const latest = recent[0];
+      summary.textContent = (latest && latest.highlights && latest.highlights.length > 0)
+        ? '📊 ' + latest.highlights[0]
+        : '';
+    }
+    tbody.innerHTML = recent.map(r => {
+      const rev   = r.revenue    != null ? (r.revenue / 1e8).toFixed(2) : '—';
+      const eps   = r.eps        != null ? r.eps.toFixed(2) : '—';
+      const gm    = r.grossMargin != null ? r.grossMargin.toFixed(1) + '%' : '—';
+      const yoyV  = r.revenueYoY;
+      const qoqV  = r.revenueQoQ;
+      const yoy   = yoyV != null ? \`<span class="\${cls(yoyV)}">\${arrow(yoyV)}\${Math.abs(yoyV).toFixed(1)}%</span>\` : '—';
+      const qoq   = qoqV != null ? \`<span class="\${cls(qoqV)}">\${arrow(qoqV)}\${Math.abs(qoqV).toFixed(1)}%</span>\` : '—';
+      const epsYoy = r.epsYoY != null ? \` <span class="\${cls(r.epsYoY)}" style="font-size:9px">\${arrow(r.epsYoY)}\${Math.abs(r.epsYoY).toFixed(0)}%</span>\` : '';
       return \`<tr>
         <td>\${r.period}</td>
         <td>\${rev}</td>
-        <td>\${fmt(r.eps)}</td>
-        <td>\${r.grossMargin != null ? fmt(r.grossMargin) + '%' : '—'}</td>
+        <td>\${eps}\${epsYoy}</td>
+        <td>\${gm}</td>
         <td>\${yoy}</td>
+        <td>\${qoq}</td>
       </tr>\`;
     }).join('');
   }

@@ -12,6 +12,21 @@ interface MopsRevenueRow {
 }
 
 // ---------------------------------------------------------------------------
+// FinMind 季損益表
+// ---------------------------------------------------------------------------
+interface FinMindIncomeRow {
+  date: string;              // "2024-09-30"
+  stock_id: string;
+  type: string;              // "Q1" | "Q2" | "Q3" | "Q4"
+  revenue: number;           // 千元
+  gross_profit: number;      // 千元
+  operating_income: number;  // 千元
+  net_income: number;        // 千元
+  eps: number;
+}
+interface FinMindResponse<T> { status: number; data: T[]; }
+
+// ---------------------------------------------------------------------------
 // SEC EDGAR submissions 型別（精簡）
 // ---------------------------------------------------------------------------
 interface SecFiling {
@@ -44,11 +59,7 @@ export class FinancialReportService {
 
   private static readonly MOPS_BASE = 'https://mops.twse.com.tw/nas/t21/sii';
   private static readonly SEC_BASE = 'https://data.sec.gov';
-
-  constructor(private readonly context: vscode.ExtensionContext) {}
-
-  // ---------------------------------------------------------------------------
-  // 公開 API
+  private static readonly FINMIND_BASE = 'https://api.finmindtrade.com/api/v4/data';
   // ---------------------------------------------------------------------------
 
   /**
@@ -67,8 +78,52 @@ export class FinancialReportService {
       : await this.fetchUSReports(symbol, n);
 
     const withCompare = this.comparePeriods(reports);
-    this.cache.set(cacheKey, { data: withCompare, expiry: Date.now() + 3600_000 }); // 快取 1 小時
-    return withCompare;
+    const withHighlights = this.addHighlights(withCompare);
+    this.cache.set(cacheKey, { data: withHighlights, expiry: Date.now() + 3600_000 }); // 快取 1 小時
+    return withHighlights;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Highlights（摘要文字）
+  // ---------------------------------------------------------------------------
+
+  private addHighlights(reports: FinancialReportSummary[]): FinancialReportSummary[] {
+    return reports.map((r, i) => ({
+      ...r,
+      highlights: this.buildHighlights(r, i > 0 ? reports[i - 1] : undefined),
+    }));
+  }
+
+  private buildHighlights(r: FinancialReportSummary, prev?: FinancialReportSummary): string[] {
+    const parts: string[] = [];
+    const f1 = (n: number) => Math.abs(n).toFixed(1);
+    const dir = (n: number) => n >= 0 ? '▲' : '▼';
+
+    // 營收 YoY / QoQ
+    if (r.revenueYoY !== undefined) {
+      const abs = Math.abs(r.revenueYoY);
+      const s = abs >= 20 ? '大幅' : abs < 3 ? '小幅' : '';
+      parts.push(`營收${s}年${r.revenueYoY >= 0 ? '增' : '減'} ${dir(r.revenueYoY)}${f1(r.revenueYoY)}%`);
+    } else if (r.revenueQoQ !== undefined) {
+      parts.push(`營收季${r.revenueQoQ >= 0 ? '增' : '減'} ${dir(r.revenueQoQ)}${f1(r.revenueQoQ)}%`);
+    }
+
+    // 毛利率 QoQ
+    if (r.grossMargin !== undefined && prev?.grossMargin !== undefined) {
+      const diff = r.grossMargin - prev.grossMargin;
+      if (Math.abs(diff) >= 0.5) {
+        parts.push(`毛利率${diff >= 0 ? '提升' : '下滑'} ${dir(diff)}${Math.abs(diff).toFixed(1)}pp`);
+      }
+    }
+
+    // EPS YoY
+    if (r.epsYoY !== undefined) {
+      parts.push(`EPS 年${r.epsYoY >= 0 ? '增' : '減'} ${dir(r.epsYoY)}${f1(r.epsYoY)}%`);
+    }
+
+    if (parts.length === 0) { return []; }
+    // 合成一行摘要
+    return [parts.join('，')];
   }
 
   /**
@@ -99,49 +154,94 @@ export class FinancialReportService {
   }
 
   // ---------------------------------------------------------------------------
-  // 台股：MOPS 月營收
+  // 台股：FinMind 季損益（優先）；降級到 MOPS 月營收彙總
   // ---------------------------------------------------------------------------
 
   private async fetchTWReports(symbol: string, periods: number): Promise<FinancialReportSummary[]> {
-    const results: FinancialReportSummary[] = [];
+    // 優先嘗試 FinMind 季損益（含 EPS / 毛利率）
+    const finmind = await this.fetchFinMindQuarterly(symbol, periods + 4).catch(() => []);
+    if (finmind.length >= 2) { return finmind.slice(-periods); }
+
+    // 降級：MOPS 月營收並行抓取後彙總為季
+    return this.fetchMopsQuarterly(symbol, periods);
+  }
+
+  /** FinMind TaiwanStockIncomeStatement 季損益 */
+  private async fetchFinMindQuarterly(symbol: string, periods: number): Promise<FinancialReportSummary[]> {
+    const token = vscode.workspace.getConfiguration('stockHeatmap').get<string>('apiKey', '');
+    if (!token) { return []; }
+    const yearsBack = Math.ceil(periods / 4) + 1;
+    const start = new Date();
+    start.setFullYear(start.getFullYear() - yearsBack);
+    const url = `${FinancialReportService.FINMIND_BASE}?dataset=TaiwanStockIncomeStatement` +
+      `&data_id=${symbol}&start_date=${start.toISOString().slice(0, 10)}&token=${encodeURIComponent(token)}`;
+    const resp = await fetch(url).catch(() => null);
+    if (!resp || !resp.ok) { return []; }
+    const json = await resp.json() as FinMindResponse<FinMindIncomeRow>;
+    if (!Array.isArray(json.data) || json.data.length === 0) { return []; }
+
+    const quarters = json.data
+      .filter(r => /^Q[1-4]$/.test(r.type))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    return quarters.map((r): FinancialReportSummary => ({
+      symbol: r.stock_id,
+      period: this.toQuarterPeriod(r.date),
+      revenue: (r.revenue ?? 0) * 1000,
+      eps: r.eps != null && r.eps !== 0 ? r.eps : undefined,
+      grossMargin: r.gross_profit > 0 && r.revenue > 0
+        ? Math.round(r.gross_profit / r.revenue * 10000) / 100 : undefined,
+      operatingMargin: r.operating_income > 0 && r.revenue > 0
+        ? Math.round(r.operating_income / r.revenue * 10000) / 100 : undefined,
+      highlights: [],
+      sourceUrls: ['https://api.finmindtrade.com'],
+    }));
+  }
+
+  /** MOPS 月營收並行抓取，彙總為季度 */
+  private async fetchMopsQuarterly(symbol: string, periods: number): Promise<FinancialReportSummary[]> {
+    const monthsNeeded = periods * 3 + 6; // 額外抓半年以便 YoY 對比
     const now = new Date();
-
-    // 抓最近 periods 個月的月營收（月報為台股最易取得的定期財務資料）
-    for (let i = 0; i < periods; i++) {
+    const configs = Array.from({ length: monthsNeeded }, (_, i) => {
       const dt = new Date(now.getFullYear(), now.getMonth() - i - 1, 1);
-      const rocYear = dt.getFullYear() - 1911;
-      const month = dt.getMonth() + 1;
-      const periodStr = `${dt.getFullYear()}M${String(month).padStart(2, '0')}`;
+      return { dt, rocYear: dt.getFullYear() - 1911, month: dt.getMonth() + 1 };
+    });
 
-      try {
-        const row = await this.fetchMopsRevenue(symbol, rocYear, month);
-        if (row) {
-          results.push({
-            symbol,
-            period: periodStr,
-            revenue: Number(row.revenue.replace(/,/g, '')) * 1000, // 千元 → 元
-            highlights: [],
-            sourceUrls: [`https://mops.twse.com.tw`],
-          });
-        }
-      } catch {
-        // 單月失敗不中斷，繼續抓其他月份
-      }
+    const settled = await Promise.allSettled(
+      configs.map(c => this.fetchMopsRevenue(symbol, c.rocYear, c.month)
+        .then(row => row ? { year: c.dt.getFullYear(), month: c.month, revenue: Number(row.revenue.replace(/,/g, '')) * 1000 } : null)
+      ),
+    );
+
+    const monthly = settled
+      .filter((r): r is PromiseFulfilledResult<{ year: number; month: number; revenue: number } | null> => r.status === 'fulfilled' && r.value != null)
+      .map(r => r.value!)
+      .sort((a, b) => a.year !== b.year ? a.year - b.year : a.month - b.month);
+
+    if (monthly.length === 0) { return []; }
+
+    // 彙總為季度
+    const qMap = new Map<string, number>();
+    for (const m of monthly) {
+      const q = Math.ceil(m.month / 3);
+      const key = `${m.year}Q${q}`;
+      qMap.set(key, (qMap.get(key) ?? 0) + m.revenue);
     }
 
-    return results.reverse(); // 升冪
+    return Array.from(qMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .slice(-periods)
+      .map(([period, revenue]) => ({ symbol, period, revenue, highlights: [], sourceUrls: ['https://mops.twse.com.tw'] }));
   }
 
   private async fetchMopsRevenue(
     symbol: string, rocYear: number, month: number,
   ): Promise<MopsRevenueRow | undefined> {
-    // MOPS 月營收 JSON API
     const url = `${FinancialReportService.MOPS_BASE}/t21sc03_${rocYear}_${month}.json`;
     const resp = await fetch(url, {
       headers: { 'User-Agent': 'StockHeatmapVSCodeExtension/1.0' },
     });
     if (!resp.ok) { return undefined; }
-
     interface MopsMonth { [code: string]: MopsRevenueRow }
     const json = await resp.json() as MopsMonth;
     return json[symbol];
