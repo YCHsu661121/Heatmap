@@ -47,6 +47,20 @@
       {
         "command": "stockHeatmap.analyzeSymbol",
         "title": "Stock Heatmap: Analyze Current Symbol"
+      },
+      {
+        "command": "stockHeatmap.addAlertRule",
+        "title": "Stock Heatmap: Add Alert Rule",
+        "icon": "$(bell-dot)"
+      },
+      {
+        "command": "stockHeatmap.manageAlerts",
+        "title": "Stock Heatmap: Manage Alerts",
+        "icon": "$(bell)"
+      },
+      {
+        "command": "stockHeatmap.runAlertCheck",
+        "title": "Stock Heatmap: Run Alert Check Now"
       }
     ],
     "viewsContainers": {

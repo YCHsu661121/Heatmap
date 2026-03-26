@@ -7,7 +7,8 @@ import { FinancialReportService } from './services/FinancialReportService';
 import { LLMOrchestrator, AnalysisPayload } from './services/LLMOrchestrator';
 import { TechnicalIndicatorEngine } from './analysis/TechnicalIndicatorEngine';
 import { SignalEngine } from './analysis/SignalEngine';
-import { Candle, SignalResult } from './types';
+import { AlertEngine } from './alerts/AlertEngine';
+import { Candle, SignalResult, AlertRule } from './types';
 
 export function activate(context: vscode.ExtensionContext) {
   // ── 服務初始化 ─────────────────────────────────────────────────────────────
@@ -16,8 +17,54 @@ export function activate(context: vscode.ExtensionContext) {
   const financials = new FinancialReportService(context);
   const indicator  = new TechnicalIndicatorEngine();
   const signal     = new SignalEngine();
-  const llm        = new LLMOrchestrator(context);
+  const llm        = new LLMOrchestrator(context);  const alertEng   = new AlertEngine(context);
 
+  // ── 提醒定時器（依 refreshIntervalSec 周期檢查） ──────────────────────────
+  async function runAlertCheck(): Promise<void> {
+    const rules = alertEng.getRules();
+    if (rules.filter(r => r.enabled).length === 0) { return; }
+    try {
+      const cfg   = vscode.workspace.getConfiguration('stockHeatmap');
+      const alertsEnabled = cfg.get<boolean>('alerts.enabled', true);
+      if (!alertsEnabled) { return; }
+
+      // 從 watchlist 取得所有需要監控的股票代碼
+      const raw: unknown[] = cfg.get('watchlist', []);
+      const allSymbols = raw.map((e) =>
+        typeof e === 'string' ? (e as string).toUpperCase() : (e as WatchlistEntry).symbol,
+      );
+      const ruleSymbols = [...new Set(rules.map(r => r.symbol))];
+      const symbols = [...new Set([...allSymbols, ...ruleSymbols])];
+      if (symbols.length === 0) { return; }
+
+      // 從 TWSE/TPEX 免費批次資料將 quotes 准備好
+      const quotes = await marketData.getQuotes(symbols);
+
+      // 技術指標（僅有 indicator 類型提醒才需要 candles）
+      const indicatorRuleSymbols = [...new Set(
+        rules.filter(r => r.enabled && r.type === 'indicator').map(r => r.symbol),
+      )];
+      const signalMap = new Map<string, SignalResult>();
+      await Promise.allSettled(indicatorRuleSymbols.map(async (sym) => {
+        try {
+          const to   = new Date().toISOString().slice(0, 10);
+          const from = new Date(Date.now() - 120 * 86_400_000).toISOString().slice(0, 10);
+          const candles = await marketData.getCandles(sym, '1D', from, to);
+          if (candles.length >= 26) {
+            const snap = indicator.calculate(candles);
+            signalMap.set(sym, signal.evaluate(snap, candles));
+          }
+        } catch { /* 單檔失敗不中斷 */ }
+      }));
+
+      alertEng.checkAlerts(quotes, signalMap, rules);
+    } catch { /* 整體檢查失敗不影響主流程 */ }
+  }
+
+  const intervalSec = vscode.workspace.getConfiguration('stockHeatmap')
+    .get<number>('refreshIntervalSec', 60);
+  const alertTimer = setInterval(() => { void runAlertCheck(); }, Math.max(intervalSec, 30) * 1000);
+  context.subscriptions.push({ dispose: () => clearInterval(alertTimer) });
   // ── Sidebar TreeView ───────────────────────────────────────────────────────
   const watchlistProvider = new WatchlistProvider(context, marketData);
   vscode.window.registerTreeDataProvider('stockHeatmap.watchlist', watchlistProvider);
@@ -252,6 +299,178 @@ export function activate(context: vscode.ExtensionContext) {
       } catch (e: unknown) {
         panel.showError(`LLM 分析失敗：${String(e)}`);
       }
+    }),
+
+    // ── 指令：新增提醒規則 ─────────────────────────────────────────────────
+    vscode.commands.registerCommand('stockHeatmap.addAlertRule', async () => {
+      // 安全使用 showQuickPick + showInputBox 於正常 TypeScript 检查
+      const sym = await vscode.window.showInputBox({
+        prompt: '輸入要監控的股票代碼（如 2330 或 AAPL）',
+        placeHolder: '2330',
+        validateInput: (v: string) => v.trim().length === 0 ? '不能為空' : undefined,
+      });
+      if (!sym) { return; }
+
+      const typePick = await vscode.window.showQuickPick([
+        { label: '💹 股價突砻', description: 'price', detail: '股價 > / < / ≥ / ≤ 閨値' },
+        { label: '📈 漲跌幅', description: 'changePercent', detail: '漲跌幅 ≥ x% 或 ≤ -x%' },
+        { label: '📉 RSI 指標', description: 'rsi14', detail: 'RSI14 超賣 < 30 或超買 > 70' },
+        { label: '🔄 均線交叉', description: 'sma_cross', detail: 'SMA5 黄金/死亡交叉' },
+        { label: '📰 新聞情緒', description: 'news', detail: '偵測負面或關鍵字新聞' },
+      ], { placeHolder: '選擇提醒類型' });
+      if (!typePick) { return; }
+
+      let ruleType: AlertRule['type'] = 'price';
+      let ruleTarget = '';
+      let ruleOperator: AlertRule['operator'] = '>';
+      let ruleValue: number | string = 0;
+      let ruleSeverity: AlertRule['severity'] = 'info';
+
+      switch (typePick.description) {
+        case 'price': {
+          ruleType = 'price';
+          const opPick = await vscode.window.showQuickPick(
+            [{ label: '> 大於', v: '>' }, { label: '< 小於', v: '<' }, { label: '≥ 大於等於', v: '>=' }, { label: '≤ 小於等於', v: '<=' }],
+            { placeHolder: '選擇運算符' },
+          );
+          if (!opPick) { return; }
+          ruleOperator = opPick.v as AlertRule['operator'];
+          const val = await vscode.window.showInputBox({ prompt: '輸入閨値價格', placeHolder: '100', validateInput: (v: string) => isNaN(Number(v)) ? '請輸入數字' : undefined });
+          if (!val) { return; }
+          ruleValue = Number(val);
+          ruleSeverity = 'warning';
+          break;
+        }
+        case 'changePercent': {
+          ruleType = 'changePercent';
+          const opPick = await vscode.window.showQuickPick(
+            [{ label: '≥ 漲幅達...', v: '>=' }, { label: '≤ 跌幅達...', v: '<=' }],
+            { placeHolder: '選擇運算符' },
+          );
+          if (!opPick) { return; }
+          ruleOperator = opPick.v as AlertRule['operator'];
+          const val = await vscode.window.showInputBox({ prompt: '輸入漲跌幅熾値（%），如 3 或 -3', placeHolder: '3', validateInput: (v: string) => isNaN(Number(v)) ? '請輸入數字' : undefined });
+          if (!val) { return; }
+          ruleValue = Number(val);
+          ruleSeverity = 'info';
+          break;
+        }
+        case 'rsi14': {
+          ruleType = 'indicator';
+          ruleTarget = 'rsi14';
+          const opPick = await vscode.window.showQuickPick(
+            [{ label: '< 超賣區', v: '<' }, { label: '> 超買區', v: '>' }],
+            { placeHolder: '選擇條件' },
+          );
+          if (!opPick) { return; }
+          ruleOperator = opPick.v as AlertRule['operator'];
+          const defaultV = ruleOperator === '<' ? '30' : '70';
+          const val = await vscode.window.showInputBox({ prompt: 'RSI 熾値', value: defaultV, validateInput: (v: string) => isNaN(Number(v)) ? '請輸入數字' : undefined });
+          if (!val) { return; }
+          ruleValue = Number(val);
+          ruleSeverity = 'warning';
+          break;
+        }
+        case 'sma_cross': {
+          ruleType = 'indicator';
+          ruleTarget = 'sma5';
+          const crossPick = await vscode.window.showQuickPick(
+            [{ label: '🟢 黄金交叉（SMA5 上穿 SMA20）', v: 'crossesAbove' }, { label: '🔴 死亡交叉（SMA5 下穿 SMA20）', v: 'crossesBelow' }],
+            { placeHolder: '選擇交叉方向' },
+          );
+          if (!crossPick) { return; }
+          ruleOperator = crossPick.v as AlertRule['operator'];
+          ruleValue = 0; // sma_cross 不需要 threshold
+          ruleSeverity = 'warning';
+          break;
+        }
+        case 'news': {
+          ruleType = 'news';
+          ruleTarget = 'sentiment';
+          const newsPick = await vscode.window.showQuickPick(
+            [
+              { label: '🟥 負面新聞', v: 'negative', op: 'contains' as AlertRule['operator'] },
+              { label: '🟢 正面新聞', v: 'positive', op: 'contains' as AlertRule['operator'] },
+              { label: '🔍 關鍵字', v: '__keyword__', op: 'contains' as AlertRule['operator'] },
+            ],
+            { placeHolder: '選擇新聞類型' },
+          );
+          if (!newsPick) { return; }
+          if (newsPick.v === '__keyword__') {
+            const kw = await vscode.window.showInputBox({ prompt: '輸入關鍵字（如: 寿险安装、斷貨）' });
+            if (!kw) { return; }
+            ruleValue = kw;
+            ruleOperator = 'contains';
+          } else {
+            ruleTarget = 'sentiment';
+            ruleValue = newsPick.v;
+            ruleOperator = 'contains';
+          }
+          ruleSeverity = 'info';
+          break;
+        }
+        default: return;
+      }
+
+      const cooldownStr = await vscode.window.showInputBox({
+        prompt: '提醒冷卻時間（秒），防止重複詰暴',
+        value: '1800',
+        validateInput: (v: string) => isNaN(Number(v)) || Number(v) < 0 ? '請輸入正整數' : undefined,
+      });
+      if (cooldownStr === undefined) { return; }
+
+      const newRule: AlertRule = {
+        id: `${sym.trim().toUpperCase()}_${ruleType}_${Date.now()}`,
+        symbol: sym.trim().toUpperCase(),
+        enabled: true,
+        type: ruleType,
+        operator: ruleOperator,
+        target: ruleTarget,
+        value: ruleValue,
+        cooldownSec: Number(cooldownStr) || 1800,
+        severity: ruleSeverity,
+      };
+      await alertEng.addRule(newRule);
+      vscode.window.showInformationMessage(`✅ 已新增提醒規則：${newRule.id}`);
+    }),
+
+    // ── 指令：查看 / 刪除提醒規則 ──────────────────────────────────────────
+    vscode.commands.registerCommand('stockHeatmap.manageAlerts', async () => {
+      const rules = alertEng.getRules();
+      if (rules.length === 0) {
+        const pick = await vscode.window.showInformationMessage('目前無提醒規則。', '新增規則');
+        if (pick === '新增規則') { await vscode.commands.executeCommand('stockHeatmap.addAlertRule'); }
+        return;
+      }
+      const items = rules.map(r => ({
+        label: `${r.enabled ? '✅' : '⏸️'} [${r.symbol}] ${r.type} ${r.operator} ${r.value}`,
+        description: `cooldown ${r.cooldownSec}s  severity=${r.severity}`,
+        detail: r.id,
+        id: r.id,
+      }));
+      const picked = await vscode.window.showQuickPick(items, { placeHolder: '選擇規則進行操作' });
+      if (!picked) { return; }
+      const action = await vscode.window.showQuickPick(
+        ['🔴 刪除此規則', `${rules.find(r => r.id === picked.id)?.enabled ? '⏸️ 停用' : '▶️ 啟用'}此規則`],
+        { placeHolder: '選擇操作' },
+      );
+      if (!action) { return; }
+      if (action.startsWith('🔴')) {
+        await alertEng.deleteRule(picked.id);
+        vscode.window.showInformationMessage(`已刪除規則 ${picked.id}`);
+      } else {
+        const updated = alertEng.getRules().map(r =>
+          r.id === picked.id ? { ...r, enabled: !r.enabled } : r,
+        );
+        await alertEng.saveRules(updated);
+        vscode.window.showInformationMessage(`已更新規則狀態`);
+      }
+    }),
+
+    // ── 指令：立即執行一次提醒檢查 ─────────────────────────────────
+    vscode.commands.registerCommand('stockHeatmap.runAlertCheck', async () => {
+      await runAlertCheck();
+      vscode.window.showInformationMessage('提醒檢查完成（如有觸發將顯示通知）。');
     }),
 
     // ── 指令：大盤新聞 ────────────────────────────────────────────────────────
