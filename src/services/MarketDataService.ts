@@ -231,7 +231,7 @@ export class MarketDataService {
   }
 
   /** 取得熱力圖資料（watchlist 自選股）
-   *  台股：免 Key，使用 TWSE/TPEX 批次資料篩選（與全市場熱力圖同路徑）
+   *  台股：使用 Yahoo Finance（~15 分鐘延遲，當日資料），産業別從 TWSE/FinMind 查詢
    *  美股：Finnhub 逐檔查詢，需 apiKey
    */
   async getHeatmap(market: Market, _groupBy: 'sector' | 'index'): Promise<HeatmapItem[]> {
@@ -246,17 +246,40 @@ export class MarketDataService {
     if (symbols.length === 0) { return []; }
 
     if (market === 'TW') {
-      // 使用免 Key 的 TWSE/TPEX 公開 API，從批次資料中篩出自選股
-      const infoMap = await this.getTWStockInfoMap();
+      // 使用 Yahoo Finance 取得當日（~15 分鐘延遲）報價，比 TWSE 批次昨日收盤更準確
+      const [infoMap, quotes] = await Promise.all([
+        this.getTWStockInfoMap(),
+        this.getQuotes(symbols),
+      ]);
+      // 補充 TWSE/TPEX 批次產業別（背景取得，不阻塞主流程）
       const [twseResult, tpexResult] = await Promise.all([
         this.fetchTwseStockDayAllWithFallback(),
         this.fetchTpexMainboardQuotesWithFallback(),
       ]);
-      const symbolSet = new Set(symbols);
-      return [
-        ...twseResult.rows.map((row) => this.mapTwseHeatmapRow(row, infoMap)),
-        ...tpexResult.rows.map((row) => this.mapTpexHeatmapRow(row, infoMap)),
-      ].filter((item): item is HeatmapItem => item !== undefined && symbolSet.has(item.symbol));
+      const twseMarketMap = new Map<string, 'TSE' | 'OTC'>();
+      const twseSectorMap = new Map<string, string>();
+      for (const row of twseResult.rows) {
+        const sym = row.Code?.trim();
+        if (sym) { twseMarketMap.set(sym, 'TSE'); }
+      }
+      for (const row of tpexResult.rows) {
+        const sym = row.SecuritiesCompanyCode?.trim();
+        if (sym) { twseMarketMap.set(sym, 'OTC'); }
+      }
+      return quotes.map((q): HeatmapItem => {
+        const info = infoMap.get(q.symbol);
+        const sector = info?.industry_category || twseSectorMap.get(q.symbol) || '其他';
+        const mkt = twseMarketMap.get(q.symbol) ?? 'TSE';
+        return {
+          sector,
+          symbol: q.symbol,
+          name: (q.name !== q.symbol ? q.name : null) ?? info?.stock_name ?? q.symbol,
+          changePercent: q.changePercent,
+          score: Math.round(q.changePercent * 10) / 10,
+          volume: q.volume,
+          market: mkt,
+        } as HeatmapItem;
+      });
     }
 
     // 美股：仍透過 Finnhub 逐檔查詢
