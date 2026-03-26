@@ -126,8 +126,9 @@ export class NewsService {
     };
     const parser = new Parser();
 
-    // Yahoo Finance RSS
-    const url = `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(symbol)}&region=US&lang=en-US`;
+    // 台股加 .TW 後綴，提高 Yahoo Finance RSS 命中率
+    const sym = /^\d{4,6}$/.test(symbol) ? `${symbol}.TW` : symbol;
+    const url = `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(sym)}&region=TW&lang=zh-TW`;
     const feed = await parser.parseURL(url);
 
     return (feed.items ?? []).slice(0, limit).map((item): NewsItem => ({
@@ -162,6 +163,46 @@ export class NewsService {
       url: n.url,
       summary: n.summary,
       sentiment: this.classifySentiment(n.headline, n.summary),
+    }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // 大盤新聞（Google News RSS + 鉅亨 fallback）
+  // ---------------------------------------------------------------------------
+
+  /** 取得台股大盤新聞（無需 API Key） */
+  async getMarketNews(limit = 15): Promise<NewsItem[]> {
+    const cacheKey = `market-news:TW:${limit}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached && Date.now() < cached.expiry) { return cached.data; }
+
+    // Google News RSS：台股大盤
+    const googleRss = 'https://news.google.com/rss/search?q=%E5%8F%B0%E8%82%A1+%E5%A4%A7%E7%9B%A4&hl=zh-TW&gl=TW&ceid=TW%3Azh-TW';
+    let items = await this.fetchRssUrl(googleRss, 'Google新聞', limit).catch(() => [] as NewsItem[]);
+
+    // fallback: Yahoo Finance RSS for ^TWII
+    if (items.length === 0) {
+      const yahooRss = 'https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5ETWII&region=TW&lang=zh-TW';
+      items = await this.fetchRssUrl(yahooRss, 'Yahoo Finance', limit).catch(() => []);
+    }
+
+    this.cache.set(cacheKey, { data: items, expiry: Date.now() + 300_000 });
+    return items;
+  }
+
+  private async fetchRssUrl(url: string, sourceName: string, limit: number): Promise<NewsItem[]> {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Parser = require('rss-parser') as new () => {
+      parseURL(url: string): Promise<{ items: RssItem[] }>;
+    };
+    const feed = await new Parser().parseURL(url);
+    return (feed.items ?? []).slice(0, limit).map((item): NewsItem => ({
+      title:       item.title ?? '',
+      source:      sourceName,
+      publishedAt: item.isoDate ?? item.pubDate ?? new Date().toISOString(),
+      url:         item.link ?? '',
+      summary:     item.contentSnippet ?? '',
+      sentiment:   this.classifySentiment(item.title ?? '', item.contentSnippet ?? ''),
     }));
   }
 

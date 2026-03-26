@@ -81,6 +81,24 @@ interface FinnhubCandle {
   v: number[]; t: number[]; s: string;
 }
 
+// ---------------------------------------------------------------------------
+// Yahoo Finance v8 chart API（指數 K 線，免 API Key）
+// ---------------------------------------------------------------------------
+interface YahooFinanceQuote {
+  open: (number | null)[];
+  high: (number | null)[];
+  low:  (number | null)[];
+  close: (number | null)[];
+  volume: (number | null)[];
+}
+interface YahooFinanceChartResult {
+  timestamp: number[];
+  indicators: { quote: YahooFinanceQuote[] };
+}
+interface YahooFinanceChartResponse {
+  chart: { result: YahooFinanceChartResult[] | null; error: unknown };
+}
+
 /**
  * MarketDataService — 雙市場（TW / US）報價與 K 線
  *
@@ -238,6 +256,38 @@ export class MarketDataService {
 
   didLastHeatmapMarketUseFallback(): boolean {
     return this._lastHeatmapMarketUsedFallback;
+  }
+
+  /** 取得指數 K 線（Yahoo Finance v8 API，加權指數 / OTC，免 API Key） */
+  async getIndexCandles(index: 'TWII' | 'OTC', months = 3): Promise<Candle[]> {
+    const sym = index === 'TWII' ? '%5ETWII' : '%5ETWOII';
+    const cacheKey = `index-candles:${index}:${months}`;
+    const cached = this.getCached<Candle[]>(cacheKey);
+    if (cached) { return cached; }
+
+    const range = months <= 1 ? '1mo' : months <= 3 ? '3mo' : months <= 6 ? '6mo' : '1y';
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=${range}`;
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; VSCode-Extension/1.0)' },
+    }).catch(() => null);
+    if (!resp || !resp.ok) { return []; }
+
+    const json = await resp.json() as YahooFinanceChartResponse;
+    const result = json.chart?.result?.[0];
+    if (!result?.timestamp) { return []; }
+
+    const q = result.indicators.quote[0];
+    const candles = result.timestamp.map((ts, i): Candle => ({
+      time:   new Date(ts * 1000).toISOString().slice(0, 10),
+      open:   q.open[i]   ?? q.close[i] ?? 0,
+      high:   q.high[i]   ?? q.close[i] ?? 0,
+      low:    q.low[i]    ?? q.close[i] ?? 0,
+      close:  q.close[i]  ?? 0,
+      volume: q.volume[i] ?? 0,
+    })).filter(c => c.close > 0);
+
+    this.setCached(cacheKey, candles, 300);
+    return candles;
   }
 
   /** 台股代碼資訊對照表（中文名稱 + 產業 + 市場別）Quick cache 1 hour */

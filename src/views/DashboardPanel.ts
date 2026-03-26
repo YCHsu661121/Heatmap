@@ -200,18 +200,31 @@ export class DashboardPanel {
   .hm-btn.active { background: rgba(0,120,212,0.18); color: #0078d4; font-weight: 600; }
 
   /* Heatmap Grid */
-  #heatmap-grid { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 4px; min-height: 80px; }
+  #heatmap-grid { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr));
+                  grid-auto-flow: dense; grid-auto-rows: 18px; gap: 2px; margin-top: 4px; min-height: 80px; }
   .hm-group { width: 100%; margin-bottom: 2px; }
   .hm-group-label { font-size: 10px; color: var(--vscode-descriptionForeground); padding: 1px 4px; margin-bottom: 2px; }
-  .hm-group-cells { display: flex; flex-wrap: wrap; gap: 2px; }
+  .hm-group-cells { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr));
+                    grid-auto-flow: dense; grid-auto-rows: 18px; gap: 2px; }
   .hm-cell { display: flex; flex-direction: column; align-items: center; justify-content: center;
              padding: 3px 4px; border-radius: 3px; cursor: pointer; overflow: hidden;
-             min-width: 48px; min-height: 40px; transition: opacity 0.1s; }
+             min-width: 0; min-height: 0; text-align: center; transition: opacity 0.1s;
+             grid-column: span var(--hm-col, 2); grid-row: span var(--hm-row, 2); }
   .hm-cell:hover { opacity: 0.8; }
   .hm-cell .hm-name { font-size: 11px; font-weight: 700; line-height: 1.3; white-space: nowrap;
                       overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
   .hm-cell .hm-sym  { font-size: 9px; opacity: 0.75; line-height: 1.2; }
   .hm-cell .hm-pct  { font-size: 11px; font-weight: 600; line-height: 1.3; }
+  .hm-cell.compact .hm-name { font-size: 10px; }
+  .hm-cell.compact .hm-sym { display: none; }
+  .hm-cell.compact .hm-pct { font-size: 10px; }
+  .hm-cell.tiny .hm-name { font-size: 9px; }
+  .hm-cell.tiny .hm-sym { display: none; }
+  .hm-cell.tiny .hm-pct { font-size: 9px; }
+  @media (max-width: 700px) {
+    #heatmap-grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+    .hm-group-cells { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+  }
 
   /* Chart */
   #chart-container { width: 100%; height: 260px; background: var(--bg); position: relative; }
@@ -331,12 +344,19 @@ export class DashboardPanel {
     </div>
     <!-- Indicators -->
     <div id="indicators-grid"></div>
+    <div style="display:flex;gap:4px;margin-top:6px">
+      <button class="btn" id="btn-twii" style="font-size:11px;padding:2px 8px">加權指數</button>
+      <button class="btn" id="btn-otc"  style="font-size:11px;padding:2px 8px">OTC指數</button>
+    </div>
   </div>
 
   <!-- News -->
   <div class="card">
-    <h2>最新新聞</h2>
-    <ul id="news-list"><li style="color:var(--vscode-descriptionForeground)">請先載入股票</li></ul>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <h2 style="margin:0">最新新聞</h2>
+      <button class="btn" id="btn-market-news" style="font-size:11px;padding:2px 8px">大盤新聞</button>
+    </div>
+    <ul id="news-list"><li style="color:var(--vscode-descriptionForeground)">載入大盤新聞…</li></ul>
   </div>
 
   <!-- Financials -->
@@ -382,6 +402,21 @@ export class DashboardPanel {
   });
 
   function setStatus(msg) { $('status-bar').textContent = msg; }
+
+  $('btn-market-news').addEventListener('click', () => {
+    $('news-list').innerHTML = '<li style="color:var(--vscode-descriptionForeground)">載入大盤新聞…</li>';
+    vscode.postMessage({ command: 'loadMarketNews', payload: null });
+  });
+
+  $('btn-twii').addEventListener('click', () => {
+    vscode.postMessage({ command: 'loadIndex', payload: { index: 'TWII' } });
+    setStatus('載入加權指數…');
+  });
+
+  $('btn-otc').addEventListener('click', () => {
+    vscode.postMessage({ command: 'loadIndex', payload: { index: 'OTC' } });
+    setStatus('載入OTC指數…');
+  });
 
   // ── 接收 Extension 訊息 ───────────────────────────────────────────────────
   window.addEventListener('message', (event) => {
@@ -473,14 +508,19 @@ export class DashboardPanel {
     return (v != null && v > 0) ? Number(v) : 1;
   }
 
-  // 建立單格 HTML；flexGrow 控制相對寬度
-  function hmCellHtml(item, flexGrow) {
+  function clamp(n, min, max) {
+    return Math.max(min, Math.min(max, n));
+  }
+
+  // 建立單格 HTML；以 grid span 控制相對面積
+  function hmCellHtml(item, spanCol, spanRow) {
     const pct  = hmPct(item);
     const [bg, fg] = hmColor(pct);
     const sign = pct > 0 ? '+' : '';
     const sym  = String(item.symbol).replace(/'/g, '&#39;').replace(/</g,'&lt;');
     const name = String(item.name  || '').replace(/'/g, '&#39;').replace(/</g,'&lt;');
-    return \`<div class="hm-cell" style="flex:\${flexGrow} 1 0%;background:\${bg};color:\${fg}"
+    const sizeClass = spanCol <= 3 || spanRow <= 2 ? 'tiny' : spanCol <= 5 || spanRow <= 3 ? 'compact' : '';
+    return \`<div class="hm-cell \${sizeClass}" style="--hm-col:\${spanCol};--hm-row:\${spanRow};background:\${bg};color:\${fg}"
           title="[\${sym}] \${name}  \${sign}\${pct.toFixed(2)}%"
           onclick="loadSymbol('\${sym}')">
       <span class="hm-name">\${name || sym}</span>
@@ -520,23 +560,28 @@ export class DashboardPanel {
       }));
     }
 
-    // 對數縮放後計算 flexGrow（1~60）
+    // 對數縮放後計算格子跨度，讓面積差異更明顯
     const sizes  = list.map(i => Math.log1p(hmSize(i)));
     const maxSz  = Math.max(...sizes, 1);
-    const grows  = sizes.map(s => Math.max(1, Math.round((s / maxSz) * 60)));
+    const spans = sizes.map((size) => {
+      const ratio = maxSz > 0 ? size / maxSz : 0;
+      const col = clamp(Math.round(2 + ratio * 10), 2, 12);
+      const row = clamp(Math.round(2 + ratio * 6), 2, 8);
+      return { col, row };
+    });
 
     if (_hmState.groupBy === 'none' || _hmState.display === 'sector') {
-      grid.innerHTML = list.map((item, i) => hmCellHtml(item, grows[i])).join('');
+      grid.innerHTML = list.map((item, i) => hmCellHtml(item, spans[i].col, spans[i].row)).join('');
     } else {
       // 區分產業分組
       const secMap = {};
       list.forEach((item, i) => {
         const s = item.sector || '其他';
         if (!secMap[s]) { secMap[s] = []; }
-        secMap[s].push({ item, grow: grows[i] });
+        secMap[s].push({ item, span: spans[i] });
       });
       grid.innerHTML = Object.entries(secMap).map(([sec, entries]) => {
-        const cells = entries.map(e => hmCellHtml(e.item, e.grow)).join('');
+        const cells = entries.map(e => hmCellHtml(e.item, e.span.col, e.span.row)).join('');
         return \`<div class="hm-group">
           <div class="hm-group-label">\${sec}</div>
           <div class="hm-group-cells">\${cells}</div>
@@ -657,7 +702,7 @@ export class DashboardPanel {
     const maxP = Math.max(...allVals);
     const range = maxP - minP || 1;
 
-    const pad = { t: 16, b: 20, l: 50, r: 10 };
+    const pad = { t: 16, b: 30, l: 58, r: 10 };
     const cw  = (w - pad.l - pad.r) / n;
     const toY = (p) => pad.t + (1 - (p - minP) / range) * (h - pad.t - pad.b);
     const toX = (i) => pad.l + i * cw + cw / 2; // 中心 x
@@ -674,6 +719,18 @@ export class DashboardPanel {
       ctx.fillText(price.toFixed(0), pad.l - 4, y + 3);
       ctx.strokeStyle = 'rgba(128,128,128,0.1)';
       ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    }
+    ctx.textAlign = 'left';
+
+    // ── 時間刻度（X 軸日期標籤）──────────────────────────────────────────────
+    const xStep = Math.max(1, Math.ceil(n / 8));
+    ctx.fillStyle = 'rgba(160,160,160,0.85)';
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    for (let xi = 0; xi < n; xi += xStep) {
+      const t = slice[xi].time || '';
+      const label = t.length >= 10 ? t.slice(5, 10) : t;
+      ctx.fillText(label, toX(xi), h - 8);
     }
     ctx.textAlign = 'left';
 

@@ -45,6 +45,10 @@ export function activate(context: vscode.ExtensionContext) {
         } catch (e: unknown) {
           panel.showError(`熱力圖載入失敗：${String(e)}`);
         }
+        // 背景載入大盤新聞（不阻塞主流程）
+        news.getMarketNews().then(items => {
+          if (items.length > 0) { panel.updateNews('大盤新聞', items); }
+        }).catch(() => {});
       }
     }),
 
@@ -249,6 +253,30 @@ export function activate(context: vscode.ExtensionContext) {
         panel.showError(`LLM 分析失敗：${String(e)}`);
       }
     }),
+
+    // ── 指令：大盤新聞 ────────────────────────────────────────────────────────
+    vscode.commands.registerCommand('stockHeatmap.loadMarketNews', async () => {
+      const panel = DashboardPanel.current;
+      if (!panel) { return; }
+      try {
+        const items = await news.getMarketNews();
+        panel.updateNews('大盤新聞', items);
+      } catch { /* ignore */ }
+    }),
+
+    // ── 指令：指數 K 線（加權 / OTC）─────────────────────────────────────────
+    vscode.commands.registerCommand('stockHeatmap.loadIndex',
+      async (payload: { index: 'TWII' | 'OTC' }) => {
+        const panel = DashboardPanel.createOrShow(context);
+        const label = payload.index === 'TWII' ? '加權指數(^TWII)' : 'OTC指數(^TWOII)';
+        panel.showLoading(`載入${label}…`);
+        try {
+          const candles = await marketData.getIndexCandles(payload.index);
+          panel.updateChart(label, candles);
+        } catch (e: unknown) {
+          panel.showError(`指數載入失敗：${String(e)}`);
+        }
+      }),
   );
 
   // ---------------------------------------------------------------------------
