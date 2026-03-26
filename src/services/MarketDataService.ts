@@ -91,7 +91,18 @@ interface YahooFinanceQuote {
   close: (number | null)[];
   volume: (number | null)[];
 }
+interface YahooFinanceChartMeta {
+  currency?: string;
+  symbol?: string;
+  regularMarketPrice?: number;
+  regularMarketChange?: number;
+  regularMarketChangePercent?: number;
+  regularMarketVolume?: number;
+  chartPreviousClose?: number;
+  previousClose?: number;
+}
 interface YahooFinanceChartResult {
+  meta: YahooFinanceChartMeta;
   timestamp: number[];
   indicators: { quote: YahooFinanceQuote[] };
 }
@@ -390,9 +401,12 @@ export class MarketDataService {
     const close = this.parseMarketNumber(row.ClosingPrice);
     const turnover = this.parseMarketNumber(row.TradeValue);
     const volume = this.parseMarketNumber(row.TradeVolume);
-    const change = this.parseSignedMarketNumber(row.Change);
-    if (close <= 0 || turnover <= 0 || volume <= 0 || !Number.isFinite(change)) { return undefined; }
-
+    // TWSE Change 欄位是絕對値（無符號），以收盤 vs 開盤推斷方向
+    const absChange = this.parseMarketNumber(row.Change);
+    if (close <= 0 || turnover <= 0 || volume <= 0 || !Number.isFinite(absChange)) { return undefined; }
+    const openPrice = this.parseMarketNumber(row.OpeningPrice);
+    const sign = (Number.isFinite(openPrice) && openPrice > 0 && close < openPrice) ? -1 : 1;
+    const change = sign * Math.abs(absChange);
     const prevClose = close - change;
     if (prevClose <= 0) { return undefined; }
 
@@ -452,8 +466,8 @@ export class MarketDataService {
     const token = this.getApiKey('TW');
     if (!token) {
       this.warnNoFinMindToken();
-      // 降級：從 TWSE/TPEX 免費批次資料取得
-      return this.getTWQuoteFromBatch(symbol);
+      // 降級：Yahoo Finance 免費延遲報價（含正確漲跌符號）
+      return this.getTWQuoteFromYahoo(symbol);
     }
 
     const today = new Date().toISOString().slice(0, 10);
@@ -480,6 +494,39 @@ export class MarketDataService {
     return quote;
   }
 
+  /** 從 Yahoo Finance 取單檔 TW 報價（免費、含符號漲跌、延遲 ~15 分鐘） */
+  private async getTWQuoteFromYahoo(symbol: string): Promise<Quote> {
+    const yahooSym = encodeURIComponent(symbol + '.TW');
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSym}?interval=1d&range=2d`;
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; VSCode-Extension/1.0)' },
+    }).catch(() => null);
+    if (resp && resp.ok) {
+      const json = await resp.json() as YahooFinanceChartResponse;
+      const meta = json.chart?.result?.[0]?.meta;
+      if (meta && meta.regularMarketPrice && meta.regularMarketPrice > 0) {
+        const price = meta.regularMarketPrice;
+        const prevClose = meta.chartPreviousClose ?? meta.previousClose ?? price;
+        const change = meta.regularMarketChange ?? (price - prevClose);
+        const changePercent = meta.regularMarketChangePercent ?? (prevClose > 0 ? (change / prevClose) * 100 : 0);
+        const quote: Quote = {
+          symbol,
+          name: symbol,
+          price,
+          change,
+          changePercent,
+          volume: meta.regularMarketVolume ?? 0,
+          updatedAt: new Date().toISOString(),
+        };
+        const quoteTtl = Math.max(10, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30));
+        this.setCached(`quote:TW:${symbol}`, quote, quoteTtl);
+        return quote;
+      }
+    }
+    // Yahoo 失敗時降級到 TWSE 批次資料（符號經修正）
+    return this.getTWQuoteFromBatch(symbol);
+  }
+
   /** 從 TWSE/TPEX 批次資料取單檔報價（不需 token） */
   private async getTWQuoteFromBatch(symbol: string): Promise<Quote> {
     const [twseResult, tpexResult] = await Promise.all([
@@ -489,7 +536,11 @@ export class MarketDataService {
     const twseRow = twseResult.rows.find(r => r.Code?.trim() === symbol);
     if (twseRow) {
       const close  = this.parseMarketNumber(twseRow.ClosingPrice);
-      const change = this.parseSignedMarketNumber(twseRow.Change);
+      // TWSE Change 無符號：以開盤 vs 收盤推斷方向
+      const absChange = this.parseMarketNumber(twseRow.Change);
+      const openP = this.parseMarketNumber(twseRow.OpeningPrice);
+      const sign = (Number.isFinite(openP) && openP > 0 && close < openP) ? -1 : 1;
+      const change = sign * Math.abs(absChange);
       const prev   = close - change;
       const quote: Quote = {
         symbol,
