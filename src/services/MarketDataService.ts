@@ -110,6 +110,21 @@ interface YahooFinanceChartResponse {
 export class MarketDataService {
   private readonly cache = new Map<string, { data: unknown; expiry: number }>();
   private _lastHeatmapMarketUsedFallback = false;
+  private _didWarnNoToken = false;
+
+  /** 若未設定 FinMind token，彈出一次性警示並引導使用者設定 */
+  private warnNoFinMindToken(): void {
+    if (this._didWarnNoToken) { return; }
+    this._didWarnNoToken = true;
+    vscode.window.showWarningMessage(
+      '⚠️ 未設定 FinMind API Token，K 線圖與財報功能將使用免費替代資料源（功能受限）。',
+      '前往設定',
+    ).then(choice => {
+      if (choice === '前往設定') {
+        vscode.commands.executeCommand('workbench.action.openSettings', 'stockHeatmap.apiKey');
+      }
+    });
+  }
 
   private static readonly FINMIND_BASE = 'https://api.finmindtrade.com/api/v4/data';
   private static readonly FINNHUB_BASE = 'https://finnhub.io/api/v1';
@@ -204,7 +219,10 @@ export class MarketDataService {
     return candles;
   }
 
-  /** 取得熱力圖資料（目前回傳 watchlist 報價格式化為 HeatmapItem） */
+  /** 取得熱力圖資料（watchlist 自選股）
+   *  台股：免 Key，使用 TWSE/TPEX 批次資料篩選（與全市場熱力圖同路徑）
+   *  美股：Finnhub 逐檔查詢，需 apiKey
+   */
   async getHeatmap(market: Market, _groupBy: 'sector' | 'index'): Promise<HeatmapItem[]> {
     const raw: unknown[] = vscode.workspace.getConfiguration('stockHeatmap').get('watchlist', []);
     // watchlist 可能是舊版 string[] 或新版 WatchlistEntry[]，統一正規化取出代碼
@@ -215,6 +233,22 @@ export class MarketDataService {
       market === 'TW' ? this.detectMarket(s) === 'TW' : this.detectMarket(s) === 'US',
     );
     if (symbols.length === 0) { return []; }
+
+    if (market === 'TW') {
+      // 使用免 Key 的 TWSE/TPEX 公開 API，從批次資料中篩出自選股
+      const infoMap = await this.getTWStockInfoMap();
+      const [twseResult, tpexResult] = await Promise.all([
+        this.fetchTwseStockDayAllWithFallback(),
+        this.fetchTpexMainboardQuotesWithFallback(),
+      ]);
+      const symbolSet = new Set(symbols);
+      return [
+        ...twseResult.rows.map((row) => this.mapTwseHeatmapRow(row, infoMap)),
+        ...tpexResult.rows.map((row) => this.mapTpexHeatmapRow(row, infoMap)),
+      ].filter((item): item is HeatmapItem => item !== undefined && symbolSet.has(item.symbol));
+    }
+
+    // 美股：仍透過 Finnhub 逐檔查詢
     const quotes = await this.getQuotes(symbols);
     return quotes.map((q) => ({
       sector: 'watchlist',
@@ -296,12 +330,17 @@ export class MarketDataService {
     const cached = this.getCached<Map<string, FinMindStockInfoRow>>(cacheKey);
     if (cached) { return cached; }
     const token = this.getApiKey('TW');
+    if (!token) {
+      this.warnNoFinMindToken();
+      return new Map(); // 無 token 時回空 Map，名稱 fallback 到 TWSE 原始資料
+    }
     const url = `${MarketDataService.FINMIND_BASE}?dataset=TaiwanStockInfo&token=${encodeURIComponent(token)}`;
     const resp = await fetch(url).catch(() => null);
     if (!resp || !resp.ok) { return new Map(); }
     const json = await resp.json() as FinMindResponse<FinMindStockInfoRow>;
+    if (json.status !== 200 || !Array.isArray(json.data) || json.data.length === 0) { return new Map(); }
     const map = new Map<string, FinMindStockInfoRow>();
-    (json.data ?? []).forEach(row => map.set(row.stock_id, row));
+    json.data.forEach(row => map.set(row.stock_id, row));
     this.setCached(cacheKey, map, 3600);
     return map;
   }
@@ -410,15 +449,19 @@ export class MarketDataService {
     if (cached) { return cached; }
 
     const token = this.getApiKey('TW');
+    if (!token) {
+      this.warnNoFinMindToken();
+      // 降級：從 TWSE/TPEX 免費批次資料取得
+      return this.getTWQuoteFromBatch(symbol);
+    }
+
     const today = new Date().toISOString().slice(0, 10);
     const url = `${MarketDataService.FINMIND_BASE}?dataset=TaiwanStockPrice&data_id=${symbol}&start_date=${today}&token=${encodeURIComponent(token)}`;
 
-    const resp = await fetch(url);
-    if (!resp.ok) { throw new Error(`FinMind HTTP ${resp.status}`); }
+    const resp = await fetch(url).catch(() => null);
+    if (!resp || !resp.ok) { return this.getTWQuoteFromBatch(symbol); }
     const json = await resp.json() as FinMindResponse<FinMindQuoteRow>;
-    if (!json.data || json.data.length === 0) {
-      throw new Error(`FinMind: no data for ${symbol}`);
-    }
+    if (!json.data || json.data.length === 0) { return this.getTWQuoteFromBatch(symbol); }
 
     const last = json.data[json.data.length - 1];
     const quote: Quote = {
@@ -435,18 +478,67 @@ export class MarketDataService {
     return quote;
   }
 
+  /** 從 TWSE/TPEX 批次資料取單檔報價（不需 token） */
+  private async getTWQuoteFromBatch(symbol: string): Promise<Quote> {
+    const [twseResult, tpexResult] = await Promise.all([
+      this.fetchTwseStockDayAllWithFallback(),
+      this.fetchTpexMainboardQuotesWithFallback(),
+    ]);
+    const twseRow = twseResult.rows.find(r => r.Code?.trim() === symbol);
+    if (twseRow) {
+      const close  = this.parseMarketNumber(twseRow.ClosingPrice);
+      const change = this.parseSignedMarketNumber(twseRow.Change);
+      const prev   = close - change;
+      const quote: Quote = {
+        symbol,
+        name: twseRow.Name?.trim() || symbol,
+        price: close,
+        change,
+        changePercent: prev > 0 ? (change / prev) * 100 : 0,
+        volume: this.parseMarketNumber(twseRow.TradeVolume),
+        updatedAt: new Date().toISOString(),
+      };
+      this.setCached(`quote:TW:${symbol}`, quote, 60);
+      return quote;
+    }
+    const tpexRow = tpexResult.rows.find(r => r.SecuritiesCompanyCode?.trim() === symbol);
+    if (tpexRow) {
+      const close  = this.parseMarketNumber(tpexRow.Close);
+      const change = this.parseSignedMarketNumber(tpexRow.Change);
+      const prev   = close - change;
+      const quote: Quote = {
+        symbol,
+        name: tpexRow.CompanyName?.trim() || symbol,
+        price: close,
+        change,
+        changePercent: prev > 0 ? (change / prev) * 100 : 0,
+        volume: this.parseMarketNumber(tpexRow.TradingShares),
+        updatedAt: new Date().toISOString(),
+      };
+      this.setCached(`quote:TW:${symbol}`, quote, 60);
+      return quote;
+    }
+    throw new Error(`No data for ${symbol} in TWSE/TPEX batch`);
+  }
+
   private async getTWCandles(symbol: string, from: string, to: string, interval = '1D'): Promise<Candle[]> {
     const token = this.getApiKey('TW');
+    if (!token) {
+      this.warnNoFinMindToken();
+      // 降級：Yahoo Finance v8 免費 K 線
+      return this.getTWCandlesFromYahoo(symbol, from, to, interval);
+    }
     // 依 interval 選 FinMind dataset
     let dataset = 'TaiwanStockPrice';
     if (interval === '1W') { dataset = 'TaiwanStockWeekPrice'; }
     else if (interval === '1M' || interval === '1Y') { dataset = 'TaiwanStockMonthPrice'; }
     const url = `${MarketDataService.FINMIND_BASE}?dataset=${dataset}&data_id=${symbol}&start_date=${from}&end_date=${to}&token=${encodeURIComponent(token)}`;
-    const resp = await fetch(url);
-    if (!resp.ok) { throw new Error(`FinMind HTTP ${resp.status}`); }
+    const resp = await fetch(url).catch(() => null);
+    if (!resp || !resp.ok) { return this.getTWCandlesFromYahoo(symbol, from, to, interval); }
     const json = await resp.json() as FinMindResponse<FinMindQuoteRow>;
+    if (!json.data || json.data.length === 0) { return this.getTWCandlesFromYahoo(symbol, from, to, interval); }
 
-    return (json.data ?? []).map((row): Candle => ({
+    return json.data.map((row): Candle => ({
       time: row.date,
       open: row.open,
       high: row.max,
@@ -454,6 +546,35 @@ export class MarketDataService {
       close: row.close,
       volume: row.Trading_Volume,
     }));
+  }
+
+  /** 免費 K 線降級路徑：Yahoo Finance v8（台股代碼加 .TW 後綴） */
+  private async getTWCandlesFromYahoo(symbol: string, from: string, _to: string, interval: string): Promise<Candle[]> {
+    const yahooSym = encodeURIComponent(symbol + '.TW');
+    const fromDate = new Date(from);
+    const now = new Date();
+    const diffDays = Math.ceil((now.getTime() - fromDate.getTime()) / 86400000);
+    const range = diffDays <= 30 ? '1mo' : diffDays <= 90 ? '3mo' : diffDays <= 180 ? '6mo' : '1y';
+    const yInterval = interval === '1W' ? '1wk' : interval === '1M' || interval === '1Y' ? '1mo' : '1d';
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSym}?interval=${yInterval}&range=${range}`;
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; VSCode-Extension/1.0)' },
+    }).catch(() => null);
+    if (!resp || !resp.ok) { return []; }
+    const json = await resp.json() as YahooFinanceChartResponse;
+    const result = json.chart?.result?.[0];
+    if (!result?.timestamp) { return []; }
+    const q = result.indicators.quote[0];
+    return result.timestamp
+      .map((ts, i): Candle => ({
+        time: new Date(ts * 1000).toISOString().slice(0, 10),
+        open:   q.open[i]   ?? q.close[i] ?? 0,
+        high:   q.high[i]   ?? q.close[i] ?? 0,
+        low:    q.low[i]    ?? q.close[i] ?? 0,
+        close:  q.close[i]  ?? 0,
+        volume: q.volume[i] ?? 0,
+      }))
+      .filter(c => c.close > 0);
   }
 
   // ---------------------------------------------------------------------------
