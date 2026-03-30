@@ -21,6 +21,8 @@ export interface AnalysisPayload {
   newsList: Array<{ title: string; summary: string; publishedAt: string }>;
 }
 
+type TeamMemberConfig = LlmTeamConfig['members'][number];
+
 /** JSON 結構化回傳型別 */
 interface LlmJsonResponse {
   action: 'BUY' | 'SELL' | 'WATCH';
@@ -48,6 +50,12 @@ export class LLMOrchestrator {
     `你是一位量化分析師助理。根據提供的技術指標摘要與近期新聞，
 輸出嚴格的 JSON 格式：{"action":"BUY"|"SELL"|"WATCH","confidence":0.0至1.0,"reason":"精簡理由（中文，不超過80字）"}。
 禁止輸出任何 JSON 以外的文字。若資料不足，輸出 {"action":"WATCH","confidence":0.3,"reason":"資料不足，暫觀望"}。`;
+  private static readonly ROLE_PROMPTS: Record<NonNullable<TeamMemberConfig['role']>, string> = {
+    primary: '你是主分析師。請整合技術面、新聞面與風險，產出平衡且可執行的結論。',
+    reviewer: '你是複核分析師。請主動找出主結論的漏洞、反例與矛盾之處。',
+    'risk-checker': '你是風險官。請優先關注下行風險、事件風險、資料不足與過度自信。',
+    'tie-breaker': '你是裁決者。當訊號互相衝突時，請偏保守並清楚說明採信依據。',
+  };
 
   private readonly teamStore: LlmTeamStore;
 
@@ -128,7 +136,7 @@ export class LLMOrchestrator {
         return {
           action,
           confidence: Math.round(avgConf * 100) / 100,
-          reason: majority.map((r) => r.reason).join('；'),
+          reason: majority.map((r) => `[${r.memberName ?? r.model}] ${r.reason}`).join('；'),
           disclaimer: LLMOrchestrator.DISCLAIMER,
         };
       }
@@ -141,7 +149,7 @@ export class LLMOrchestrator {
         return {
           action,
           confidence: Math.round(scores[action] * 100) / 100,
-          reason: results.map((r) => `[${r.model}] ${r.reason}`).join('；'),
+          reason: results.map((r) => `[${r.memberName ?? r.model}] ${r.reason}`).join('；'),
           disclaimer: LLMOrchestrator.DISCLAIMER,
         };
       }
@@ -168,7 +176,7 @@ export class LLMOrchestrator {
         if (!ep || !ep.enabled) {
           return undefined;
         }
-        return this.callEndpoint(ep, payload, m.timeoutMs);
+        return this.callEndpoint(ep, payload, m.timeoutMs, m);
       }),
     );
 
@@ -183,7 +191,7 @@ export class LLMOrchestrator {
     if (members.length > 1) {
       const actions = [...new Set(members.map((m) => m.action))];
       if (actions.length > 1) {
-        disagreements.push(`模型意見分歧：${members.map((m) => `${m.model}=${m.action}`).join(', ')}`);
+        disagreements.push(`模型意見分歧：${members.map((m) => `${m.memberName ?? m.model}=${m.action}`).join(', ')}`);
       }
     }
 
@@ -233,7 +241,7 @@ export class LLMOrchestrator {
     return this.parseJson(raw);
   }
 
-  private async callOpenAIRaw(userMsg: string, endpoints: LlmEndpoint[]): Promise<string> {
+  private async callOpenAIRaw(userMsg: string, endpoints: LlmEndpoint[], systemPrompt = LLMOrchestrator.SYSTEM_PROMPT): Promise<string> {
     const ep = endpoints.find((e) => e.enabled && e.provider === 'openai');
     if (!ep) { throw new Error('無可用 OpenAI endpoint'); }
     const apiKey = vscode.workspace.getConfiguration('stockHeatmap').get<string>('apiKey', '');
@@ -243,7 +251,7 @@ export class LLMOrchestrator {
     const res = await client.chat.completions.create({
       model: ep.model,
       messages: [
-        { role: 'system', content: LLMOrchestrator.SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: userMsg },
       ],
       max_tokens: 200,
@@ -257,7 +265,7 @@ export class LLMOrchestrator {
     return this.parseJson(raw);
   }
 
-  private async callOllamaRaw(userMsg: string, endpoints: LlmEndpoint[]): Promise<string> {
+  private async callOllamaRaw(userMsg: string, endpoints: LlmEndpoint[], systemPrompt = LLMOrchestrator.SYSTEM_PROMPT): Promise<string> {
     const ollamaEps = endpoints
       .filter((e) => e.enabled && e.provider === 'ollama')
       .sort((a, b) => a.priority - b.priority);
@@ -272,7 +280,7 @@ export class LLMOrchestrator {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: ep.model,
-            prompt: `${LLMOrchestrator.SYSTEM_PROMPT}\n\n${userMsg}`,
+            prompt: `${systemPrompt}\n\n${userMsg}`,
             stream: false,
           }),
           signal: AbortSignal.timeout(30_000),
@@ -292,7 +300,7 @@ export class LLMOrchestrator {
     return this.parseJson(raw);
   }
 
-  private async callCopilotRaw(userMsg: string): Promise<string> {
+  private async callCopilotRaw(userMsg: string, systemPrompt = LLMOrchestrator.SYSTEM_PROMPT): Promise<string> {
     // VS Code LM API（GitHub Copilot）
     if (!('lm' in vscode)) {
       throw new Error('VS Code LM API 不可用（需要 GitHub Copilot 插件）');
@@ -313,7 +321,7 @@ export class LLMOrchestrator {
     const res = await model.sendRequest(
       [
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        { role: 'system', content: LLMOrchestrator.SYSTEM_PROMPT } as any,
+        { role: 'system', content: systemPrompt } as any,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         { role: 'user', content: userMsg } as any,
       ],
@@ -330,23 +338,26 @@ export class LLMOrchestrator {
     ep: LlmEndpoint,
     payload: AnalysisPayload,
     timeoutMs = 30_000,
+    member?: TeamMemberConfig,
   ): Promise<ModelRecommendation> {
     const t0 = Date.now();
     let result: LlmJsonResponse;
+    const userPrompt = this.buildAnalysisPrompt(payload, member);
+    const systemPrompt = this.buildSystemPrompt(member);
 
     try {
       if (ep.provider === 'openai') {
         result = await Promise.race([
-          this.callOpenAI(payload, [ep]),
+          this.callOpenAIRaw(userPrompt, [ep], systemPrompt).then((raw) => this.parseJson(raw)),
           new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutMs)),
         ]);
       } else if (ep.provider === 'ollama') {
         result = await Promise.race([
-          this.callOllama(payload, [ep]),
+          this.callOllamaRaw(userPrompt, [ep], systemPrompt).then((raw) => this.parseJson(raw)),
           new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutMs)),
         ]);
       } else {
-        result = await this.callCopilot(payload);
+        result = await this.callCopilotRaw(userPrompt, systemPrompt).then((raw) => this.parseJson(raw));
       }
     } catch {
       result = { action: 'WATCH', confidence: 0.2, reason: '模型超時或回傳格式錯誤' };
@@ -354,6 +365,8 @@ export class LLMOrchestrator {
 
     return {
       endpointId: ep.id,
+      memberName: member?.name,
+      memberRole: member?.role,
       provider: ep.provider,
       model: ep.model,
       latencyMs: Date.now() - t0,
@@ -365,17 +378,32 @@ export class LLMOrchestrator {
   // Prompt 建構
   // ---------------------------------------------------------------------------
 
-  private buildAnalysisPrompt(p: AnalysisPayload): string {
+  private buildAnalysisPrompt(p: AnalysisPayload, member?: TeamMemberConfig): string {
     const newsText = p.newsList.length > 0
       ? p.newsList.slice(0, 5).map((n) => `• ${n.title}`).join('\n')
       : '（無近期新聞）';
 
-    return `股票代碼：${p.symbol}（${p.market}）| 時間框架：${p.timeframe}
+    const memberPrefix = member?.userPromptPrefix?.trim()
+      ? `成員附加指令：${member.userPromptPrefix.trim()}\n`
+      : '';
+
+    return `${memberPrefix}股票代碼：${p.symbol}（${p.market}）| 時間框架：${p.timeframe}
 技術摘要：趨勢=${p.trend}，訊號=${p.signal}，RSI14=${p.rsi14}，MACD=${p.macdState}，均線=${p.maState}，突破=${p.breakoutState}
 近期新聞：
 ${newsText}
 
 請根據以上資訊，輸出 JSON 建議。`;
+  }
+
+  private buildSystemPrompt(member?: TeamMemberConfig): string {
+    if (!member) { return LLMOrchestrator.SYSTEM_PROMPT; }
+
+    return [
+      LLMOrchestrator.SYSTEM_PROMPT,
+      `目前角色：${member.name ?? member.role}`,
+      LLMOrchestrator.ROLE_PROMPTS[member.role],
+      member.systemPrompt?.trim(),
+    ].filter(Boolean).join('\n\n');
   }
 
   private buildChartPrompt(p: ChartInsightPayload): string {

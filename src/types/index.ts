@@ -162,6 +162,8 @@ export interface LlmEndpoint {
 // ---------------------------------------------------------------------------
 export interface ModelRecommendation {
   endpointId: string;
+  memberName?: string;
+  memberRole?: 'primary' | 'reviewer' | 'risk-checker' | 'tie-breaker';
   provider: 'openai' | 'ollama' | 'copilot';
   model: string;
   latencyMs: number;
@@ -185,7 +187,10 @@ export interface LlmTeamConfig {
   enabled: boolean;
   members: Array<{
     endpointId: string;
+    name?: string;
     role: 'primary' | 'reviewer' | 'risk-checker' | 'tie-breaker';
+    systemPrompt?: string;
+    userPromptPrefix?: string;
     weight: number;
     timeoutMs?: number;
   }>;
