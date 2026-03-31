@@ -44,10 +44,11 @@ interface SecSubmissions {
 /**
  * FinancialReportService — 雙市場財報摘要抓取
  *
- * 台股：MOPS 月營收 API（公開資訊觀測站）
- *        https://mops.twse.com.tw
- * 美股：SEC EDGAR data API
- *        https://data.sec.gov/submissions/CIK{cik}.json
+ * 台股：
+ *   1. FinMind TaiwanStockIncomeStatement（需 API key，含 EPS / 毛利率）
+ *   2. Fallback → MOPS 月營收 JSON (t21sc03_{ROC}.json 格式)
+ *
+ * 美股：SEC EDGAR XBRL Company Facts API
  *        https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json
  *
  * 架構原則（4.1）：
@@ -57,9 +58,16 @@ interface SecSubmissions {
 export class FinancialReportService {
   private readonly cache = new Map<string, { data: FinancialReportSummary[]; expiry: number }>();
 
-  private static readonly MOPS_BASE = 'https://mops.twse.com.tw/nas/t21/sii';
+  constructor(private readonly context?: vscode.ExtensionContext) {}
+
+  // MOPS 公開資訊觀測站（上市公司月營收 JSON）
+  // 正確 URL 格式：https://mops.twse.com.tw/nas/t21/sii/t21sc03_{ROC_YEAR}_{MONTH}.json
+  private static readonly MOPS_SII_BASE = 'https://mops.twse.com.tw/nas/t21/sii';
+  // 上櫃公司月營收 JSON
+  private static readonly MOPS_OTC_BASE = 'https://mops.twse.com.tw/nas/t21/otc';
   private static readonly SEC_BASE = 'https://data.sec.gov';
   private static readonly FINMIND_BASE = 'https://api.finmindtrade.com/api/v4/data';
+
   // ---------------------------------------------------------------------------
 
   /**
@@ -73,9 +81,17 @@ export class FinancialReportService {
     if (cached && Date.now() < cached.expiry) { return cached.data; }
 
     const n = periods ?? this.getLookbackQuarters();
-    const reports = this.detectMarket(symbol) === 'TW'
-      ? await this.fetchTWReports(symbol, n)
-      : await this.fetchUSReports(symbol, n);
+
+    let reports: FinancialReportSummary[] = [];
+    try {
+      reports = this.detectMarket(symbol) === 'TW'
+        ? await this.fetchTWReports(symbol, n)
+        : await this.fetchUSReports(symbol, n);
+    } catch (err) {
+      // 整體失敗不拋出，回傳空陣列讓 UI 顯示「無財報資料」
+      console.error(`[FinancialReportService] ${symbol} 財報抓取失敗:`, err);
+      return [];
+    }
 
     const withCompare = this.comparePeriods(reports);
     const withHighlights = this.addHighlights(withCompare);
@@ -174,31 +190,39 @@ export class FinancialReportService {
     const start = new Date();
     start.setFullYear(start.getFullYear() - yearsBack);
     const url = `${FinancialReportService.FINMIND_BASE}?dataset=TaiwanStockIncomeStatement` +
-      `&data_id=${symbol}&start_date=${start.toISOString().slice(0, 10)}&token=${encodeURIComponent(token)}`;
+      `&data_id=${encodeURIComponent(symbol)}&start_date=${start.toISOString().slice(0, 10)}&token=${encodeURIComponent(token)}`;
     const resp = await fetch(url).catch(() => null);
     if (!resp || !resp.ok) { return []; }
     const json = await resp.json() as FinMindResponse<FinMindIncomeRow>;
     if (!Array.isArray(json.data) || json.data.length === 0) { return []; }
 
+    // 過濾只保留季度資料（type = Q1~Q4）
     const quarters = json.data
       .filter(r => /^Q[1-4]$/.test(r.type))
       .sort((a, b) => a.date.localeCompare(b.date));
 
-    return quarters.map((r): FinancialReportSummary => ({
-      symbol: r.stock_id,
-      period: this.toQuarterPeriod(r.date),
-      revenue: (r.revenue ?? 0) * 1000,
-      eps: r.eps != null && r.eps !== 0 ? r.eps : undefined,
-      grossMargin: r.gross_profit > 0 && r.revenue > 0
-        ? Math.round(r.gross_profit / r.revenue * 10000) / 100 : undefined,
-      operatingMargin: r.operating_income > 0 && r.revenue > 0
-        ? Math.round(r.operating_income / r.revenue * 10000) / 100 : undefined,
-      highlights: [],
-      sourceUrls: ['https://api.finmindtrade.com'],
-    }));
+    return quarters.map((r): FinancialReportSummary => {
+      const rev = (r.revenue ?? 0) * 1000; // FinMind 單位為千元
+      return {
+        symbol: r.stock_id,
+        period: this.toQuarterPeriod(r.date),
+        revenue: rev,
+        eps: (r.eps != null && r.eps !== 0) ? r.eps : undefined,
+        grossMargin: (r.gross_profit > 0 && r.revenue > 0)
+          ? Math.round(r.gross_profit / r.revenue * 10000) / 100 : undefined,
+        operatingMargin: (r.operating_income > 0 && r.revenue > 0)
+          ? Math.round(r.operating_income / r.revenue * 10000) / 100 : undefined,
+        highlights: [],
+        sourceUrls: ['https://api.finmindtrade.com'],
+      };
+    });
   }
 
-  /** MOPS 月營收並行抓取，彙總為季度 */
+  /**
+   * MOPS 月營收並行抓取，彙總為季度
+   * URL 格式：https://mops.twse.com.tw/nas/t21/sii/t21sc03_{ROC_YEAR}_{MONTH}.json
+   * 回應為陣列，每個元素含上市公司月營收；代碼在 "公司代號" 欄位。
+   */
   private async fetchMopsQuarterly(symbol: string, periods: number): Promise<FinancialReportSummary[]> {
     const monthsNeeded = periods * 3 + 6; // 額外抓半年以便 YoY 對比
     const now = new Date();
@@ -209,12 +233,15 @@ export class FinancialReportService {
 
     const settled = await Promise.allSettled(
       configs.map(c => this.fetchMopsRevenue(symbol, c.rocYear, c.month)
-        .then(row => row ? { year: c.dt.getFullYear(), month: c.month, revenue: Number(row.revenue.replace(/,/g, '')) * 1000 } : null)
+        .then(rev => rev !== undefined
+          ? { year: c.dt.getFullYear(), month: c.month, revenue: rev }
+          : null)
       ),
     );
 
     const monthly = settled
-      .filter((r): r is PromiseFulfilledResult<{ year: number; month: number; revenue: number } | null> => r.status === 'fulfilled' && r.value != null)
+      .filter((r): r is PromiseFulfilledResult<{ year: number; month: number; revenue: number } | null> =>
+        r.status === 'fulfilled' && r.value != null)
       .map(r => r.value!)
       .sort((a, b) => a.year !== b.year ? a.year - b.year : a.month - b.month);
 
@@ -231,20 +258,54 @@ export class FinancialReportService {
     return Array.from(qMap.entries())
       .sort(([a], [b]) => a.localeCompare(b))
       .slice(-periods)
-      .map(([period, revenue]) => ({ symbol, period, revenue, highlights: [], sourceUrls: ['https://mops.twse.com.tw'] }));
+      .map(([period, revenue]) => ({
+        symbol,
+        period,
+        revenue,
+        highlights: [],
+        sourceUrls: ['https://mops.twse.com.tw'],
+      }));
   }
 
+  /**
+   * 抓取指定民國年月的 MOPS 月營收 JSON（上市 sii，上櫃 otc）
+   * 回傳該 symbol 的當月營收（元），無資料時回傳 undefined
+   */
   private async fetchMopsRevenue(
-    symbol: string, rocYear: number, month: number,
-  ): Promise<MopsRevenueRow | undefined> {
-    const url = `${FinancialReportService.MOPS_BASE}/t21sc03_${rocYear}_${month}.json`;
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': 'StockHeatmapVSCodeExtension/1.0' },
-    });
-    if (!resp.ok) { return undefined; }
-    interface MopsMonth { [code: string]: MopsRevenueRow }
-    const json = await resp.json() as MopsMonth;
-    return json[symbol];
+    symbol: string, rocYear: number, month: string | number,
+  ): Promise<number | undefined> {
+    // 嘗試上市（sii）再嘗試上櫃（otc）
+    for (const base of [FinancialReportService.MOPS_SII_BASE, FinancialReportService.MOPS_OTC_BASE]) {
+      try {
+        const url = `${base}/t21sc03_${rocYear}_${month}.json`;
+        const resp = await fetch(url, {
+          headers: {
+            'User-Agent': 'StockHeatmapVSCodeExtension/1.0',
+            'Referer': 'https://mops.twse.com.tw/',
+          },
+        });
+        if (!resp.ok) { continue; }
+        // MOPS JSON 格式為陣列，每元素為 { "公司代號": "2330", "當月營收": "123,456,789", ... }
+        interface MopsRow { [key: string]: string }
+        const json = await resp.json() as MopsRow[];
+        if (!Array.isArray(json)) { continue; }
+        const row = json.find(r =>
+          (r['公司代號'] ?? '').trim() === symbol ||
+          (r['stock_id'] ?? '').trim() === symbol,
+        );
+        if (!row) { continue; }
+        // 欄位可能是 "當月營收" 或 "revenue"（千元）
+        const raw = row['當月營收'] ?? row['revenue'] ?? '';
+        const num = Number(raw.replace(/,/g, '').trim());
+        if (Number.isFinite(num) && num > 0) {
+          // MOPS 單位為千元，轉成元
+          return num * 1000;
+        }
+      } catch {
+        // 繼續嘗試下一個 base
+      }
+    }
+    return undefined;
   }
 
   // ---------------------------------------------------------------------------
@@ -262,38 +323,91 @@ export class FinancialReportService {
     });
     if (!resp.ok) { return []; }
 
-    interface XbrlFact { end: string; val: number; form: string; accn: string; }
-    interface XbrlConcept { units: { USD?: XbrlFact[]; shares?: XbrlFact[] } }
+    interface XbrlFact {
+      end: string;
+      val: number;
+      form: string;
+      accn: string;
+      fp?: string;  // 財務期間：Q1/Q2/Q3/Q4/FY
+      frame?: string;
+    }
+    interface XbrlConcept { units: { USD?: XbrlFact[]; shares?: XbrlFact[]; pure?: XbrlFact[] } }
     interface XbrlCompanyFacts {
-      facts: { 'us-gaap'?: { Revenues?: XbrlConcept; EarningsPerShareBasic?: XbrlConcept; GrossProfit?: XbrlConcept } }
+      facts: {
+        'us-gaap'?: {
+          Revenues?: XbrlConcept;
+          RevenueFromContractWithCustomerExcludingAssessedTax?: XbrlConcept;
+          SalesRevenueNet?: XbrlConcept;
+          EarningsPerShareBasic?: XbrlConcept;
+          GrossProfit?: XbrlConcept;
+          OperatingIncomeLoss?: XbrlConcept;
+        }
+      }
     }
     const facts = await resp.json() as XbrlCompanyFacts;
 
     const gaap = facts.facts?.['us-gaap'];
     if (!gaap) { return []; }
 
-    // 抽取季度 Revenue（10-Q / 10-K 申報）
-    const revenueEntries = (gaap.Revenues?.units?.USD ?? [])
-      .filter((f) => f.form === '10-Q' || f.form === '10-K')
+    // 抽取季度 Revenue（多個可能欄位，優先順序：Revenues > RevenueFromContract > SalesRevenueNet）
+    const revenueSource =
+      gaap.Revenues ??
+      gaap.RevenueFromContractWithCustomerExcludingAssessedTax ??
+      gaap.SalesRevenueNet;
+
+    const revenueEntries = (revenueSource?.units?.USD ?? [])
+      .filter((f) => (f.form === '10-Q' || f.form === '10-K') && f.end)
       .sort((a, b) => a.end.localeCompare(b.end));
 
-    const epsEntries = gaap.EarningsPerShareBasic?.units?.shares ?? [];
-    const gpEntries = gaap.GrossProfit?.units?.USD ?? [];
+    // EPS：units 可能在 USD（每股盈餘 USD），也可能在 shares（不常見）
+    const epsSource = gaap.EarningsPerShareBasic;
+    const epsEntries: XbrlFact[] = [
+      ...(epsSource?.units?.USD ?? []),
+      ...(epsSource?.units?.shares ?? []),
+    ].filter(f => f.form === '10-Q' || f.form === '10-K');
 
-    const recent = revenueEntries.slice(-periods);
+    const gpEntries = (gaap.GrossProfit?.units?.USD ?? [])
+      .filter(f => f.form === '10-Q' || f.form === '10-K');
+
+    const opEntries = (gaap.OperatingIncomeLoss?.units?.USD ?? [])
+      .filter(f => f.form === '10-Q' || f.form === '10-K');
+
+    // 去重（相同 end 日期保留最新的 accn）
+    const uniqueRevMap = new Map<string, XbrlFact>();
+    for (const f of revenueEntries) {
+      const existing = uniqueRevMap.get(f.end);
+      if (!existing || f.accn > existing.accn) { uniqueRevMap.set(f.end, f); }
+    }
+
+    const recent = [...uniqueRevMap.values()]
+      .sort((a, b) => a.end.localeCompare(b.end))
+      .slice(-periods);
+
     return recent.map((rev): FinancialReportSummary => {
       const period = this.toQuarterPeriod(rev.end);
-      const eps = epsEntries.find((e) => e.end === rev.end && (e.form === '10-Q' || e.form === '10-K'));
-      const gp = gpEntries.find((e) => e.end === rev.end && (e.form === '10-Q' || e.form === '10-K'));
+      const eps = epsEntries
+        .filter(e => e.end === rev.end)
+        .sort((a, b) => b.accn.localeCompare(a.accn))[0]; // 取最新申報
+      const gp  = gpEntries
+        .filter(e => e.end === rev.end)
+        .sort((a, b) => b.accn.localeCompare(a.accn))[0];
+      const op  = opEntries
+        .filter(e => e.end === rev.end)
+        .sort((a, b) => b.accn.localeCompare(a.accn))[0];
 
       return {
         symbol,
         period,
         revenue: rev.val,
         eps: eps?.val,
-        grossMargin: gp && rev.val > 0 ? Math.round((gp.val / rev.val) * 10000) / 100 : undefined,
+        grossMargin: (gp && rev.val > 0)
+          ? Math.round((gp.val / rev.val) * 10000) / 100 : undefined,
+        operatingMargin: (op && rev.val > 0)
+          ? Math.round((op.val / rev.val) * 10000) / 100 : undefined,
         highlights: [],
-        sourceUrls: [`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cik}&type=10-Q&dateb=&owner=include&count=10`],
+        sourceUrls: [
+          `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cik}&type=10-Q&dateb=&owner=include&count=10`,
+        ],
       };
     });
   }
@@ -328,14 +442,18 @@ export class FinancialReportService {
     return /^\d{4,6}$/.test(symbol) ? 'TW' : 'US';
   }
 
-  /** SEC EDGAR 結束日期 → 季度字串，例如 "2024-09-30" → "2024Q3" */
+  /**
+   * 結束日期 → 季度字串，例如 "2024-09-30" → "2024Q3"
+   * 同時相容 FinMind 格式 "2024-09-30" 與 SEC EDGAR 格式 "2024-09-30"
+   */
   private toQuarterPeriod(endDate: string): string {
     const d = new Date(endDate);
+    if (isNaN(d.getTime())) { return endDate; }
     const q = Math.ceil((d.getMonth() + 1) / 3);
     return `${d.getFullYear()}Q${q}`;
   }
 
-  /** 計算兩個 period 字串之間差幾個季度（僅支援 YYYYQq 或 YYYYMmm 格式） */
+  /** 計算兩個 period 字串之間差幾個季度（僅支援 YYYYQq 格式） */
   private periodDiff(a: string, b: string): number {
     const parseQ = (s: string) => {
       const m = s.match(/^(\d{4})Q(\d)$/);

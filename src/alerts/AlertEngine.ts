@@ -159,7 +159,7 @@ export class AlertEngine {
 
   private checkIndicator(rule: AlertRule, sig: SignalResult): TriggeredAlert | null {
     const target    = rule.target;   // 'rsi14' | 'sma5' | 'sma20' | 'macd' ...
-    const snap      = sig.indicators as Record<string, number>;
+    const snap      = sig.indicators as unknown as Record<string, number>;
     const current   = snap[target];
     if (current === undefined || !Number.isFinite(current)) { return null; }
 

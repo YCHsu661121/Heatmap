@@ -147,6 +147,40 @@ export class MarketDataService {
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   // ---------------------------------------------------------------------------
+  // 快取管理（公開）
+  // ---------------------------------------------------------------------------
+
+  /**
+   * 清除報價快取，強制下次 getQuotes / getHeatmap 重新抓取即時資料
+   * @param symbol 指定代碼；若不傳則清除全部 quote:* 快取
+   */
+  invalidateQuoteCache(symbol?: string): void {
+    if (symbol) {
+      this.cache.delete(`quote:TW:${symbol}`);
+      this.cache.delete(`quote:US:${symbol}`);
+    } else {
+      for (const key of [...this.cache.keys()]) {
+        if (key.startsWith('quote:')) { this.cache.delete(key); }
+      }
+    }
+  }
+
+  /**
+   * 清除全台股熱力圖快取與 TWSE/TPEX 批次來源快取，
+   * 強制 getHeatmapMarket() 下次重新向 TWSE/TPEX 抓取。
+   */
+  invalidateHeatmapMarketCache(): void {
+    for (const key of [...this.cache.keys()]) {
+      if (
+        key === 'heatmap-market:TW' ||
+        key.startsWith('heatmap-source:')
+      ) {
+        this.cache.delete(key);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // 公開 API
   // ---------------------------------------------------------------------------
 
@@ -293,10 +327,12 @@ export class MarketDataService {
     }));
   }
 
-  /** 取得全台股今日行情（依成交額排序，最多 300 檔） */
+  /**
+   * 取得全台股今日行情（依成交額排序，最多 300 檔）
+   * 快取依 refreshIntervalSec 設定（最小 60 秒），手動刷新請先呼叫 invalidateHeatmapMarketCache()。
+   */
   async getHeatmapMarket(_market: 'TW'): Promise<HeatmapItem[]> {
-    const today = new Date().toISOString().slice(0, 10);
-    const cacheKey = `heatmap-market:TW:${today}`;
+    const cacheKey = 'heatmap-market:TW';
     const cached = this.getCached<HeatmapItem[]>(cacheKey);
     if (cached) {
       this._lastHeatmapMarketUsedFallback = false;
@@ -318,7 +354,8 @@ export class MarketDataService {
       .sort((a, b) => (b.turnover ?? 0) - (a.turnover ?? 0))
       .slice(0, 300);
 
-    const heatmapTtl = Math.max(30, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30));
+    // TTL 取 refreshIntervalSec（最小 60 秒），與全域刷新週期一致
+    const heatmapTtl = Math.max(60, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 60));
     this.setCached(cacheKey, items, heatmapTtl);
     return items;
   }
@@ -389,12 +426,13 @@ export class MarketDataService {
 
   private async fetchTwseStockDayAllWithFallback(): Promise<{ rows: TwseStockDayAllRow[]; usedFallback: boolean }> {
     const cacheKey = 'heatmap-source:TWSE';
+    const existing = this.getCached<TwseStockDayAllRow[]>(cacheKey);
     const rows = await this.fetchTwseStockDayAll();
     if (rows.length > 0) {
-      this.setCached(cacheKey, rows, 3600);
+      this.setCached(cacheKey, rows, 1800); // TWSE 批次資料快取 30 分鐘
       return { rows, usedFallback: false };
     }
-    return { rows: this.getCached<TwseStockDayAllRow[]>(cacheKey) ?? [], usedFallback: true };
+    return { rows: existing ?? [], usedFallback: true };
   }
 
   private async fetchTpexMainboardQuotes(): Promise<TpexMainboardQuoteRow[]> {
@@ -406,12 +444,13 @@ export class MarketDataService {
 
   private async fetchTpexMainboardQuotesWithFallback(): Promise<{ rows: TpexMainboardQuoteRow[]; usedFallback: boolean }> {
     const cacheKey = 'heatmap-source:TPEX';
+    const existing = this.getCached<TpexMainboardQuoteRow[]>(cacheKey);
     const rows = await this.fetchTpexMainboardQuotes();
     if (rows.length > 0) {
-      this.setCached(cacheKey, rows, 3600);
+      this.setCached(cacheKey, rows, 1800); // TPEX 批次資料快取 30 分鐘
       return { rows, usedFallback: false };
     }
-    return { rows: this.getCached<TpexMainboardQuoteRow[]>(cacheKey) ?? [], usedFallback: true };
+    return { rows: existing ?? [], usedFallback: true };
   }
 
   private mapTwseHeatmapRow(
@@ -478,7 +517,7 @@ export class MarketDataService {
   }
 
   // ---------------------------------------------------------------------------
-  // 台股 FinMind
+  // 台股 FinMind / Yahoo Finance
   // ---------------------------------------------------------------------------
 
   private async getTWQuote(symbol: string): Promise<Quote> {
@@ -502,17 +541,18 @@ export class MarketDataService {
     if (!json.data || json.data.length === 0) { return this.getTWQuoteFromBatch(symbol); }
 
     const last = json.data[json.data.length - 1];
+    const prevPrice = last.close - last.spread;
     const quote: Quote = {
       symbol,
       name: symbol,
       price: last.close,
       change: last.spread,
-      changePercent: last.close > 0 ? (last.spread / (last.close - last.spread)) * 100 : 0,
+      changePercent: prevPrice > 0 ? (last.spread / prevPrice) * 100 : 0,
       volume: last.Trading_Volume,
       updatedAt: new Date(last.date).toISOString(),
     };
 
-    const quoteTtl = Math.max(10, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30));
+    const quoteTtl = Math.max(30, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 60));
     this.setCached(cacheKey, quote, quoteTtl);
     return quote;
   }
@@ -541,7 +581,7 @@ export class MarketDataService {
           volume: meta.regularMarketVolume ?? 0,
           updatedAt: new Date().toISOString(),
         };
-        const quoteTtl = Math.max(10, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30));
+        const quoteTtl = Math.max(30, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 60));
         this.setCached(`quote:TW:${symbol}`, quote, quoteTtl);
         return quote;
       }
@@ -574,7 +614,7 @@ export class MarketDataService {
         volume: this.parseMarketNumber(twseRow.TradeVolume),
         updatedAt: new Date().toISOString(),
       };
-      const quoteTtl1 = Math.max(10, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30));
+      const quoteTtl1 = Math.max(30, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 60));
       this.setCached(`quote:TW:${symbol}`, quote, quoteTtl1);
       return quote;
     }
@@ -592,7 +632,7 @@ export class MarketDataService {
         volume: this.parseMarketNumber(tpexRow.TradingShares),
         updatedAt: new Date().toISOString(),
       };
-      const quoteTtl2 = Math.max(10, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30));
+      const quoteTtl2 = Math.max(30, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 60));
       this.setCached(`quote:TW:${symbol}`, quote, quoteTtl2);
       return quote;
     }
@@ -680,7 +720,7 @@ export class MarketDataService {
       updatedAt: new Date(json.t * 1000).toISOString(),
     };
 
-    const usTtl = Math.max(10, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 30));
+    const usTtl = Math.max(30, vscode.workspace.getConfiguration('stockHeatmap').get<number>('refreshIntervalSec', 60));
     this.setCached(cacheKey, quote, usTtl);
     return quote;
   }
@@ -750,7 +790,7 @@ export class MarketDataService {
     return Number.isFinite(parsed) ? parsed : NaN;
   }
 
-  private getApiKey(market: 'TW' | 'US'): string {
+  private getApiKey(_market: 'TW' | 'US'): string {
     // 兩市場共用同一個 apiKey 設定；若需要分開可在 settings 追加欄位
     return vscode.workspace.getConfiguration('stockHeatmap').get<string>('apiKey', '');
   }

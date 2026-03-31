@@ -1132,11 +1132,17 @@ interface SnapshotReport {
 
 **Definition of Done**
 - [x] 可在 VS Code 中開啟 Dashboard
-- [x] 可顯示至少 1 檔股票 K 線圖表（Canvas 手繪）
+- [x] 可顯示至少 1 檔股票 K 線圖表（Canvas 手繪，含 SMA5/SMA20/布林通道）
 - [x] 可顯示熱力圖與新聞清單
 - [x] 圖表上可見買賣訊號標記點
 - [ ] 圖表訊號點可開啟分析說明
-- [x] UI 基本互動正常（載入 / 刷新 / 加入自選股）
+- [x] UI 基本互動正常（自選股清單點選 / 刷新 / 加入自選股）
+- [x] K 線圖 Canvas 高寬填滿容器（display:block + container.clientWidth/Height）
+- [x] ResizeObserver debounce 100ms，面板拉伸時自動重繪
+- [x] 熱力圖改版：全寬獨立區塊 + 篩選列（市場/產業/顯示模式/尺寸指標/期別）
+- [x] 熱力圖格子依市值對數縮放（flex-grow），11 段顏色梯度
+- [x] 移除手動輸入股票代碼；選股唯一入口為熱力圖格子與 Sidebar 自選股清單
+- [x] Timeframe 切換時自動重載當前股票
 
 ---
 
@@ -1172,7 +1178,10 @@ interface SnapshotReport {
 **Definition of Done**
 - [x] `build.bat` / Docker 打包成功
 - [x] 插件可安裝於本機 VS Code
-- [ ] 基本 E2E 流程可運作（開啟→ 查詢→ 訊號→ LLM 建議）
+- [x] `.dockerignore` 建立（排除 `out/`、`dist/`、`backend/` 等，加速 build context）
+- [x] `.vscodeignore` 補全（排除 `Dockerfile`、`ToDo.md`、`build.bat`、`.github/` 等）
+- [x] vsix 從 43 檔 / 273.9 KB 縮減至 6 檔 / 210.6 KB
+- [ ] 基本 E2E 流程可運作（開啟→ 自選股點選→ 訊號→ LLM 建議）
 - [x] README 完整
 - [ ] 若採 Ollama，部署文件已標註本地模型需求
 
@@ -1272,6 +1281,8 @@ M1 → M2 → M4 → M5 → M6
    - [x] `Dockerfile` 新增 `dev` stage（`node:20-alpine`，含 `npm ci` + `vsce`）
    - [x] `docker-compose.yml` 新增 `dev` 服務（原始碼 volume mount，node_modules 隔離）
    - [x] `npm.bat` 建立（所有 npm 指令統一透過 Docker 執行）
+   - [x] `.dockerignore` 建立（排除 `out/`、`dist/`、`backend/`、`nginx/`）
+   - [x] `.vscodeignore` 補全（`Dockerfile`、`.dockerignore`、`build.bat`、`ToDo.md`、`.github/**` 等）
    - 用法：`npm.bat install`、`npm.bat run compile`、`npm.bat run watch`
 
 5. **MVP 路線（最小可用產品）**
@@ -1296,4 +1307,4 @@ M1 → M2 → M4 → M5 → M6
 
 ---
 
-*最後更新：2026-03-25 | 狀態：**M1~M5 全數完成**，M6 進行中 | 所有主要功能已實作：MarketData(TW/US)、News、FinancialReport、TechnicalIndicator、SignalEngine、DashboardPanel、WatchlistProvider、LLMOrchestrator(OpenAI/Ollama/Copilot) | `dist/heatmap.vsix`（43 檔案，86.96 KB）✅ | 剩餘：E2E 測試、Ollama 部署文件*
+*最後更新：2026-03-26 | 狀態：**M1~M5 全數完成**，M6 進行中 | 所有主要功能已實作：MarketData(TW/US)、News、FinancialReport、TechnicalIndicator、SignalEngine、DashboardPanel（熱力圖篩選列、K圖 Canvas 修正、ResizeObserver）、WatchlistProvider、LLMOrchestrator(OpenAI/Ollama/Copilot) | `dist/heatmap.vsix`（6 檔案，210.6 KB）✅ | 剩餘：E2E 測試、Ollama 部署文件*
